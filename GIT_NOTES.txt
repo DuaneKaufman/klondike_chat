@@ -1,0 +1,100 @@
+GIT NOTES (minimal commands I actually use)
+===========================================
+
+INITIAL SETUP (done once per project)
+-------------------------------------
+# Run these inside the project folder, e.g. ~/my_rust/klondike_chat
+
+# 1) Start git in this folder
+git init
+
+# 2) Make sure we don't track build artifacts
+# (if not already present)
+echo "/target" >> .gitignore
+
+# 3) First snapshot (commit)
+git add .
+git commit -m "Initial project skeleton"
+
+# 4) Hook up to GitHub (SSH)
+# (replace USERNAME with my GitHub username)
+git remote add origin git@github.com:USERNAME/klondike_chat.git
+git branch -M main
+git push -u origin main
+
+
+DAY-TO-DAY WORKFLOW
+-------------------
+# 1) See what changed
+git status
+
+# 2) See the actual diff (what lines changed)
+git diff
+
+# 3) Save a snapshot of current good state
+git add .
+git commit -m "Short message describing what I did"
+
+# 4) Backup to GitHub (when I have net)
+git push
+
+
+UNDOING STUFF
+-------------
+# Throw away ALL uncommitted changes and go back to last commit
+git restore .
+
+# Throw away changes in ONE file only
+git restore path/to/file.rs
+
+
+EXPERIMENTING WITH A NEW APPROACH
+---------------------------------
+# 1) Make sure current work is committed
+git status        # check clean or staged
+git add .
+git commit -m "Checkpoint before experiment"
+
+# 2) Create and switch to a new branch for the experiment
+git switch -c new_idea
+# (if 'switch' is not available: git checkout -b new_idea)
+
+# ...hack around, try big refactors...
+
+# 3) If I don't like this experiment:
+git switch main   # go back to the safe code
+
+# 4) If I like the experiment:
+# Option A: just keep working on this branch forever.
+# Option B (optional): merge it back later once I care to learn merging.
+
+
+LOOKING AT HISTORY
+------------------
+# Compact history (good overview)
+git log --oneline
+
+# See full details of last few commits
+git log
+
+
+CLEANING BUILD ARTIFACTS
+------------------------
+# Remove compiled stuff to save disk space
+cargo clean
+
+
+TL;DR FLOW
+----------
+1) Edit code.
+2) cargo run
+3) If I like the result:
+   git add .
+   git commit -m "Describe change"
+4) Occasionally:
+   git push    # backup to GitHub
+
+If things get messy:
+- To undo local changes:      git restore .
+- To try a wild idea safely:  git switch -c branch_name
+- To go back to known-good:   git switch main
