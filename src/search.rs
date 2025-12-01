@@ -48,7 +48,37 @@ impl Default for SearchLimits {
     }
 }
 
-/// Public entry point: solve a single deck using DFS with default limits.
+/// How much detail to emit while exploring the game tree for a single deck.
+#[derive(Clone, Copy, Debug)]
+pub enum DetailLevel {
+    /// Only return a `GameOutcome`; do not print per-node information.
+    Summary,
+    /// Print every visited node's tableau and move stack as the search runs.
+    Trace,
+}
+
+/// Configuration for running a search on a single starting deck.
+#[derive(Clone, Copy, Debug)]
+pub struct SearchConfig {
+    /// Limits on how far the search may go.
+    pub limits: SearchLimits,
+    /// How much detail to emit while searching.
+    pub detail: DetailLevel,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        SearchConfig {
+            limits: SearchLimits::default(),
+            detail: DetailLevel::Summary,
+        }
+    }
+}
+
+
+
+/// Public entry point: solve a single deck using DFS with default limits
+/// and no per-node printing.
 ///
 /// Other strategies (BFS, heuristic search) can share the same `GameState`
 /// type and child expansion logic.
@@ -58,7 +88,22 @@ pub fn solve_single_deck(
     solve_single_deck_dfs(initial_deck, SearchLimits::default())
 }
 
-/// Real, but bounded, depth-first search for a single starting deck.
+/// Depth-first search entry point that accepts explicit search limits but
+/// runs in summary mode (no per-node printing). This keeps existing code
+/// that calls `solve_single_deck_dfs` working as before.
+pub fn solve_single_deck_dfs(
+    initial_deck: [Card; CARDS_PER_DECK as usize],
+    limits: SearchLimits,
+) -> GameOutcome {
+    let cfg = SearchConfig {
+        limits,
+        detail: DetailLevel::Summary,
+    };
+    solve_single_deck_with_config(initial_deck, &cfg)
+}
+
+/// Real, but bounded, depth-first search for a single starting deck with
+/// configurable limits and detail level.
 ///
 /// This function:
 ///   - Wraps the deck in a `GameState` (deck + move stack + tableau + hash).
@@ -68,11 +113,14 @@ pub fn solve_single_deck(
 ///     same tableau state (loop detection).
 ///   - Stops when:
 ///       * a winning tableau is found, or
-///       * `limits.max_nodes` is exceeded, or
-///       * `limits.max_depth` is reached on all branches.
-pub fn solve_single_deck_dfs(
+///       * `cfg.limits.max_nodes` is exceeded, or
+///       * `cfg.limits.max_depth` is reached on all branches.
+///
+/// When `cfg.detail == DetailLevel::Trace`, the search will also print
+/// each visited node's tableau and move stack to stdout.
+pub fn solve_single_deck_with_config(
     initial_deck: [Card; CARDS_PER_DECK as usize],
-    limits: SearchLimits,
+    cfg: &SearchConfig,
 ) -> GameOutcome {
     let initial_state = GameState::new(initial_deck);
     let mut stack: Vec<GameState> = Vec::new();
@@ -86,13 +134,30 @@ pub fn solve_single_deck_dfs(
 
     while let Some(state) = stack.pop() {
         nodes_visited += 1;
-        if nodes_visited > limits.max_nodes {
+        if nodes_visited > cfg.limits.max_nodes {
             // Hard cutoff: treat as "no win found within limits".
             break;
         }
 
         // Use the cached tableau directly.
         let tableau = state.current_tableau();
+
+        // Optional trace output: show tableau and move stack for this node.
+        if let DetailLevel::Trace = cfg.detail {
+            println!("=== DFS node {} ===", nodes_visited);
+            println!("Depth: {}", state.moves.len());
+            println!("Hash:  0x{:016x}", state.tableau_hash);
+            crate::display::print_tableau(&tableau);
+            if state.moves.is_empty() {
+                println!("Moves so far: []");
+            } else {
+                println!("Moves so far ({}):", state.moves.len());
+                for (i, mv) in state.moves.iter().enumerate() {
+                    println!("  {:2}: {:?}", i + 1, mv.kind);
+                }
+            }
+            println!();
+        }
 
         // Check for win.
         if tableau.is_win() {
@@ -105,7 +170,7 @@ pub fn solve_single_deck_dfs(
         }
 
         // Depth limit: do not expand children beyond this depth.
-        if state.moves.len() as u16 >= limits.max_depth {
+        if state.moves.len() as u16 >= cfg.limits.max_depth {
             continue;
         }
 
@@ -139,7 +204,6 @@ pub fn solve_single_deck_dfs(
         nodes_visited,
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,8 +431,7 @@ Stock is now empty after step {};", step);
             }
         }
 
-        println!("
-Shelved games created: {}", shelved.len());
+        println!("\nShelved games created: {}", shelved.len());
         for (idx, g) in shelved.iter().enumerate() {
             println!(
                 "Shelved[{}]: hash=0x{:016x}, moves={}, last move={:?}",
