@@ -1,5 +1,5 @@
 //! Move representation and move generation for Klondike (draw-3, unlimited redeals).
-//!
+//
 //! This module defines a compact `Move` type plus helpers to generate all
 //! legal moves from a given `Tableau`, plus an `apply` method that mutates
 //! a tableau in-place according to a chosen move. Higher-level search code
@@ -183,7 +183,7 @@ fn is_valid_run(cards: &[Card]) -> bool {
 ///   - Waste  -> Foundation (top card only)
 ///   - Column -> Column (any valid descending alternating-color run)
 ///   - Waste  -> Column (top card only)
-///   - FlipColumn when a column has cards but all are face-down
+///   - FlipColumn when a column has cards but all face-down
 ///   - DealFromStock when stock is non-empty
 ///   - RedealStock when stock is empty and waste is non-empty
 pub fn generate_legal_moves(tab: &Tableau) -> Vec<Move> {
@@ -387,6 +387,10 @@ impl Move {
                 let card = col.cards[top_idx as usize];
                 // Remove the card from the column.
                 col.len -= 1;
+                // If we just removed the last face-up card and there are still
+                // face-down cards underneath, Klondike rules force the newly
+                // exposed card to become face-up.
+                flip_exposed_card_after_removal(col);
                 // Update foundations.
                 let f_idx = foundation_index_for(card);
                 let r_idx = rank_index(card);
@@ -416,10 +420,9 @@ impl Move {
                 let c = col as usize;
                 let col_ref = &mut tab.columns[c];
                 if col_ref.len > 0 && col_ref.num_face_down > 0 {
-                    // Reveal the bottom-most face-down card: decrement the
-                    // count of face-down cards. The actual card data in
-                    // `cards[]` does not change.
-                    col_ref.num_face_down -= 1;
+                    // Reveal the bottom-most face-down card consistent with
+                    // the same helper used for automatic flips after moves.
+                    flip_exposed_card_after_removal(col_ref);
                 }
             }
 
@@ -542,6 +545,22 @@ impl Move {
     }
 }
 
+
+/// Helper: after removing one or more cards from the *top* of a column,
+/// check whether we have just exposed a previously face-down card. If the
+/// column still has cards and all of them are currently marked as
+/// face-down (`len == num_face_down`), Klondike rules force the new top
+/// card to be flipped face-up. We model that by decrementing
+/// `num_face_down` by 1.
+///
+/// This keeps the column's (hidden, visible) split consistent after
+/// moves such as ColumnToColumn and ColumnToFoundation.
+fn flip_exposed_card_after_removal<const N: usize>(col: &mut crate::tableau::Column<N>) {
+    if col.len > 0 && col.len == col.num_face_down {
+        col.num_face_down -= 1;
+    }
+}
+
 /// Helper: move a run of cards from `src` to `dst`, where the run begins
 /// at `src_index` (top-based index) and extends to the current bottom.
 ///
@@ -566,10 +585,13 @@ fn move_run_between_columns<const N: usize>(
     }
     dst.len = (dst_len + count) as u8;
 
-    // Shrink the source column. We do not modify `num_face_down` here since
-    // we always move only face-up cards and the face-down prefix (indices
-    // 0..num_face_down) remains in place.
+    // Shrink the source column. We always move only face-up cards, so the
+    // face-down prefix (indices 0..num_face_down) remains in place.
+    //
+    // However, if we removed *all* face-up cards and there are still cards
+    // left, Klondike rules force the newly exposed card to become face-up.
     src.len = src_index;
+    flip_exposed_card_after_removal(src);
 }
 
 // ----- Tests -----
@@ -579,6 +601,7 @@ mod tests {
     use super::*;
     use crate::card::{standard_deck, CARDS_PER_DECK, Rank};
     use crate::display::print_tableau;
+    use crate::game::GameState;
     use crate::tableau::Tableau;
 
     /// Print a hint about how to run these tests to see clean, non-interleaved
@@ -609,26 +632,24 @@ mod tests {
         }
     }
 
-    /// Helper to build a randomized tableau from a given seed.
-    fn random_tableau(seed: u32) -> Tableau {
+    /// Helper to build a randomized *game state* (deck + empty move stack)
+    /// from a given seed.
+    fn random_game_state(seed: u32) -> GameState {
         let mut deck = standard_deck();
         shuffle_deck(&mut deck, seed);
-        Tableau::deal_from_shuffled(deck)
-    }
-
-    /// Apply one "deal from stock" draw to the tableau: draw up to 3 cards
-    /// from stock onto waste. This matches the semantics of `DealFromStock`.
-    fn apply_one_draw_from_stock(tab: &mut Tableau) {
-        Move { kind: MoveKind::DealFromStock }.apply(tab);
+        GameState::new(deck)
     }
 
     /// Demonstration: generate and print legal moves for three different
-    /// randomized initial tableaus, *and* for the same tableaus after one
-    /// draw from stock has been applied.
+    /// randomized initial tableaus, and show how the move stack and hash
+    /// describe the game state.
     ///
     /// For each seed we print:
-    ///   - initial tableau + legal moves
-    ///   - tableau after one draw-from-stock + legal moves
+    ///   - initial tableau (move stack empty + hash)
+    ///   - move stack contents (empty)
+    ///   - tableau after one draw-from-stock, performed by *real* game code
+    ///   - move stack contents (one `DealFromStock` entry)
+    ///   - hash of the updated tableau
     #[test]
     fn demo_random_tableaus_moves() {
         println!("
@@ -639,13 +660,19 @@ mod tests {
 
         for (i, &seed) in seeds.iter().enumerate() {
             println!("
---- Tableau {} (seed = {}) ---", i + 1, seed);
+--- Game {} (seed = {}) ---", i + 1, seed);
 
-            // Original initial layout
-            let tab_initial = random_tableau(seed);
+            // Initial game state: deck + empty move stack.
+            let mut game = random_game_state(seed);
+
+            // Use the *implemented* code path to obtain the tableau:
+            let tab_initial = game.current_tableau();
             println!("
-Initial layout:");
+Initial tableau (move stack is empty):");
             print_tableau(&tab_initial);
+            println!("Move stack length: {}", game.move_count());
+            println!("Move stack contents: []");
+            println!("Tableau hash: 0x{:016x}", game.tableau_hash);
 
             let moves_initial = generate_legal_moves(&tab_initial);
             println!("Legal moves in initial layout ({} total):", moves_initial.len());
@@ -653,12 +680,19 @@ Initial layout:");
                 println!("  {:2}: {}", j + 1, mv.describe(&tab_initial));
             }
 
-            // After one draw from stock
-            let mut tab_draw = random_tableau(seed); // same starting layout
-            apply_one_draw_from_stock(&mut tab_draw);
+            // After one draw-from-stock: use the real game method `apply_move`
+            // to both mutate the tableau and record the move.
+            game.apply_move(Move { kind: MoveKind::DealFromStock });
+            let tab_draw = game.current_tableau();
             println!("
-After one draw-from-stock:");
+After one draw-from-stock (move stack has one entry):");
             print_tableau(&tab_draw);
+            println!("Move stack length: {}", game.move_count());
+            println!("Move stack contents:");
+            for (idx, mv) in game.moves.iter().enumerate() {
+                println!("  {:2}: {:?}", idx + 1, mv.kind);
+            }
+            println!("Tableau hash: 0x{:016x}", game.tableau_hash);
 
             let moves_draw = generate_legal_moves(&tab_draw);
             println!(
@@ -691,6 +725,59 @@ After one draw-from-stock:");
     }
 
     /// Basic unit check: foundation move logic for Ace and non-Ace.
+
+    /// When moving the last face-up card off a column that still has hidden
+    /// cards, the newly exposed card must automatically flip to face-up.
+    ///
+    /// This test builds a small tableau column with three face-down cards
+    /// and one face-up card, moves the face-up card to another column via
+    /// a real `Move`, and checks that exactly one of the previously hidden
+    /// cards is now face-up.
+    #[test]
+    fn moving_last_face_up_card_flips_hidden_card() {
+        use crate::card::{Card, Rank, Suit};
+
+        let mut tab = Tableau::new_empty();
+
+        // Column 0: three face-down cards, then one face-up.
+        let col0 = &mut tab.columns[0];
+        col0.push(Card::new(Suit::Hearts, Rank::Ace), true);
+        col0.push(Card::new(Suit::Clubs, Rank::Two), true);
+        col0.push(Card::new(Suit::Spades, Rank::Three), true);
+        col0.push(Card::new(Suit::Diamonds, Rank::Four), false);
+
+        assert_eq!(col0.len(), 4);
+        assert_eq!(col0.num_face_down(), 3);
+        assert_eq!(col0.num_face_up(), 1);
+
+        // Column 1: empty destination pile.
+        let _col1 = &mut tab.columns[1];
+
+        // Move the single face-up card (the run starting at index 3) from
+        // column 0 to column 1 using a real ColumnToColumn move.
+        let mv = Move {
+            kind: MoveKind::ColumnToColumn {
+                src_col: 0,
+                src_index: 3, // top-based index of the face-up card
+                dst_col: 1,
+            },
+        };
+        mv.apply(&mut tab);
+
+        let col0_after = &tab.columns[0];
+        assert_eq!(col0_after.len(), 3, "one card removed from column 0");
+        assert_eq!(
+            col0_after.num_face_down(),
+            2,
+            "one of the previously hidden cards should have flipped face-up"
+        );
+        assert_eq!(
+            col0_after.num_face_up(),
+            1,
+            "exactly one face-up card should remain after the automatic flip"
+        );
+    }
+
     #[test]
     fn foundation_move_logic() {
         use crate::card::Suit::*;
