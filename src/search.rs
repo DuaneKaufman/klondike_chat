@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use crate::card::{Card, CARDS_PER_DECK};
-use crate::game::GameState;
+use crate::game::{GameState, TerminationReason};
 use crate::moves::{generate_legal_moves, Move};
 
 /// Outcome of solving a single starting deck.
@@ -26,6 +26,12 @@ pub struct GameOutcome {
     pub winning_line: Option<Vec<Move>>,
     /// Number of search nodes visited before terminating (win or cutoff).
     pub nodes_visited: u64,
+    /// Why the DFS terminated for this starting deck (win, cutoff, loop, ...).
+    pub termination: TerminationReason,
+    /// Maximum depth (number of moves) reached on any explored branch.
+    pub max_branch_depth: u16,
+    /// Maximum number of shelved game states (DFS stack size) observed.
+    pub max_shelved: u64,
 }
 
 /// Limits for a search run. These prevent infinite exploration when there
@@ -42,8 +48,10 @@ pub struct SearchLimits {
 impl Default for SearchLimits {
     fn default() -> Self {
         SearchLimits {
-            max_nodes: 100_000,
-            max_depth: 256,
+            // max_nodes: 100_000,
+            // max_depth: 256,
+            max_nodes: 1_600_000,
+            max_depth: 4096,
         }
     }
 }
@@ -76,9 +84,7 @@ impl Default for SearchConfig {
 }
 
 
-
-/// Public entry point: solve a single deck using DFS with default limits
-/// and no per-node printing.
+/// Public entry point: solve a single deck using DFS with default limits.
 ///
 /// Other strategies (BFS, heuristic search) can share the same `GameState`
 /// type and child expansion logic.
@@ -88,9 +94,12 @@ pub fn solve_single_deck(
     solve_single_deck_dfs(initial_deck, SearchLimits::default())
 }
 
-/// Depth-first search entry point that accepts explicit search limits but
-/// runs in summary mode (no per-node printing). This keeps existing code
-/// that calls `solve_single_deck_dfs` working as before.
+
+/// Real, but bounded, depth-first search for a single starting deck.
+///
+/// This convenience function accepts explicit search limits but always
+/// runs in summary mode (no per-node printing). It simply delegates to
+/// `solve_single_deck_with_config` with `DetailLevel::Summary`.
 pub fn solve_single_deck_dfs(
     initial_deck: [Card; CARDS_PER_DECK as usize],
     limits: SearchLimits,
@@ -126,17 +135,32 @@ pub fn solve_single_deck_with_config(
     let mut stack: Vec<GameState> = Vec::new();
     stack.push(initial_state.clone());
 
+    // Additional statistics about the search.
+    // Start with one shelved game state: the initial node on the DFS stack.
+    let mut max_shelved: u64 = stack.len() as u64;
+    // Track the deepest move sequence (branch depth) we ever explore.
+    let mut max_branch_depth: u16 = 0;
+
     // Visited set of tableau hashes for this starting deck.
     let mut visited: HashSet<u64> = HashSet::new();
     visited.insert(initial_state.tableau_hash);
 
     let mut nodes_visited: u64 = 0;
+    // Classification of why this DFS terminated for this deck.
+    let mut termination = TerminationReason::LossNoMoreMoves;
 
     while let Some(state) = stack.pop() {
         nodes_visited += 1;
         if nodes_visited > cfg.limits.max_nodes {
             // Hard cutoff: treat as "no win found within limits".
+            termination = TerminationReason::MaxNodesReached;
             break;
+        }
+
+        // Track maximum branch depth (in moves) seen so far.
+        let depth_here = state.moves.len() as u16;
+        if depth_here > max_branch_depth {
+            max_branch_depth = depth_here;
         }
 
         // Use the cached tableau directly.
@@ -161,16 +185,28 @@ pub fn solve_single_deck_with_config(
 
         // Check for win.
         if tableau.is_win() {
+            if let DetailLevel::Trace = cfg.detail {
+                println!(
+                    "Found a win at depth {} after visiting {} nodes.",
+                    state.moves.len(),
+                    nodes_visited
+                );
+            }
             return GameOutcome {
                 initial_deck: state.initial_deck,
                 is_win: true,
                 winning_line: Some(state.moves),
                 nodes_visited,
+                termination: TerminationReason::Win,
+                max_branch_depth,
+                max_shelved,
             };
         }
 
         // Depth limit: do not expand children beyond this depth.
         if state.moves.len() as u16 >= cfg.limits.max_depth {
+            // This branch cannot be extended because of the depth cap.
+            termination = TerminationReason::MaxDepthReached;
             continue;
         }
 
@@ -178,11 +214,13 @@ pub fn solve_single_deck_with_config(
         let moves = generate_legal_moves(&tableau);
         if moves.is_empty() {
             // Dead end: no moves, not a win -> backtrack.
+            termination = TerminationReason::LossNoMoreMoves;
             continue;
         }
 
         // DFS: push children in *reverse* order so that the first move
         // in `moves` will be explored first.
+        let mut any_new_child = false;
         for mv in moves.into_iter().rev() {
             let mut child = state.clone();
             // Use the real game method to mutate tableau + record move + update hash.
@@ -191,8 +229,22 @@ pub fn solve_single_deck_with_config(
             // Loop detection: only explore this child if its tableau hash
             // has not yet been seen for this starting deck.
             if visited.insert(child.tableau_hash) {
+                any_new_child = true;
                 stack.push(child);
             }
+        }
+
+        // After pushing children, update the maximum number of shelved
+        // game states (DFS stack size) observed so far.
+        let shelved_here = stack.len() as u64;
+        if shelved_here > max_shelved {
+            max_shelved = shelved_here;
+        }
+
+        // If there were candidate moves but every child was rejected by the
+        // visited-set, then this last step on the branch was purely a loop.
+        if !any_new_child {
+            termination = TerminationReason::LoopOnLastBranch;
         }
     }
 
@@ -202,8 +254,14 @@ pub fn solve_single_deck_with_config(
         is_win: false,
         winning_line: None,
         nodes_visited,
+        termination,
+        max_branch_depth,
+        max_shelved,
     }
 }
+
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,7 +489,8 @@ Stock is now empty after step {};", step);
             }
         }
 
-        println!("\nShelved games created: {}", shelved.len());
+        println!("
+Shelved games created: {}", shelved.len());
         for (idx, g) in shelved.iter().enumerate() {
             println!(
                 "Shelved[{}]: hash=0x{:016x}, moves={}, last move={:?}",

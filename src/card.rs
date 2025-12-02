@@ -254,6 +254,31 @@ pub fn standard_deck() -> [Card; CARDS_PER_DECK as usize] {
     cards
 }
 
+/// Return a deterministically shuffled standard deck given a 32-bit seed.
+///
+/// This uses the same simple LCG/Fisher–Yates shuffle that is used in the
+/// test code, but is available to the main solver so we can generate
+/// pseudo-random starting decks without pulling in external RNG crates.
+pub fn shuffled_deck_from_seed(seed: u32) -> [Card; CARDS_PER_DECK as usize] {
+    let mut deck = standard_deck();
+    let mut state = seed;
+
+    fn lcg(state: &mut u32) -> u32 {
+        *state = state
+            .wrapping_mul(1664525)
+            .wrapping_add(1013904223);
+        *state
+    }
+
+    let len = deck.len();
+    for i in (1..len).rev() {
+        let r = (lcg(&mut state) as usize) % (i + 1);
+        deck.swap(i, r);
+    }
+
+    deck
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

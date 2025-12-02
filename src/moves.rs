@@ -387,11 +387,7 @@ impl Move {
                 let card = col.cards[top_idx as usize];
                 // Remove the card from the column.
                 col.len -= 1;
-                // If we just removed the last face-up card and there are still
-                // face-down cards underneath, Klondike rules force the newly
-                // exposed card to become face-up.
                 flip_exposed_card_after_removal(col);
-                // Update foundations.
                 let f_idx = foundation_index_for(card);
                 let r_idx = rank_index(card);
                 tab.foundations[f_idx] = r_idx + 1;
@@ -420,9 +416,10 @@ impl Move {
                 let c = col as usize;
                 let col_ref = &mut tab.columns[c];
                 if col_ref.len > 0 && col_ref.num_face_down > 0 {
-                    // Reveal the bottom-most face-down card consistent with
-                    // the same helper used for automatic flips after moves.
-                    flip_exposed_card_after_removal(col_ref);
+                    // Reveal the bottom-most face-down card: decrement the
+                    // count of face-down cards. The actual card data in
+                    // `cards[]` does not change.
+                    col_ref.num_face_down -= 1;
                 }
             }
 
@@ -448,6 +445,18 @@ impl Move {
                 }
             }
         }
+        // Debug-time sanity check: any non-empty column must have at least
+        // one face-up card (i.e., the top card is never face-down).
+        #[cfg(debug_assertions)]
+        {
+            for col in &tab.columns {
+                if col.len > 0 {
+                    debug_assert!(col.num_face_down < col.len,
+                        "Column invariant violated: non-empty column has all cards face-down");
+                }
+            }
+        }
+
     }
 
     /// Render a move as a human-readable string, optionally using details
@@ -542,22 +551,7 @@ impl Move {
 
             MoveKind::RedealStock => "Redeal Stock from Waste".to_string(),
         }
-    }
-}
 
-
-/// Helper: after removing one or more cards from the *top* of a column,
-/// check whether we have just exposed a previously face-down card. If the
-/// column still has cards and all of them are currently marked as
-/// face-down (`len == num_face_down`), Klondike rules force the new top
-/// card to be flipped face-up. We model that by decrementing
-/// `num_face_down` by 1.
-///
-/// This keeps the column's (hidden, visible) split consistent after
-/// moves such as ColumnToColumn and ColumnToFoundation.
-fn flip_exposed_card_after_removal<const N: usize>(col: &mut crate::tableau::Column<N>) {
-    if col.len > 0 && col.len == col.num_face_down {
-        col.num_face_down -= 1;
     }
 }
 
@@ -566,6 +560,15 @@ fn flip_exposed_card_after_removal<const N: usize>(col: &mut crate::tableau::Col
 ///
 /// Both columns are assumed to use the `top-to-bottom` storage convention,
 /// with `len` entries in `cards[0..len)`.
+fn flip_exposed_card_after_removal<const N: usize>(col: &mut crate::tableau::Column<N>) {
+    // If we just removed the last face-up card from this column, the new top
+    // card (previously face-down) becomes exposed and should be treated as
+    // face-up. This matches Klondike's "flip when you clear a face-down" rule.
+    if col.len > 0 && col.len == col.num_face_down {
+        col.num_face_down -= 1;
+    }
+}
+
 fn move_run_between_columns<const N: usize>(
     src: &mut crate::tableau::Column<N>,
     dst: &mut crate::tableau::Column<N>,
@@ -585,11 +588,10 @@ fn move_run_between_columns<const N: usize>(
     }
     dst.len = (dst_len + count) as u8;
 
-    // Shrink the source column. We always move only face-up cards, so the
-    // face-down prefix (indices 0..num_face_down) remains in place.
-    //
-    // However, if we removed *all* face-up cards and there are still cards
-    // left, Klondike rules force the newly exposed card to become face-up.
+    // Shrink the source column. We move only face-up cards, so the
+    // face-down prefix (indices 0..num_face_down) remains in place, but
+    // if we removed the last face-up card then the new top card becomes
+    // exposed and must be flipped face-up.
     src.len = src_index;
     flip_exposed_card_after_removal(src);
 }
@@ -599,7 +601,8 @@ fn move_run_between_columns<const N: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::card::{standard_deck, CARDS_PER_DECK, Rank};
+    use crate::card::{standard_deck, CARDS_PER_DECK};
+    use crate::card::Rank;
     use crate::display::print_tableau;
     use crate::game::GameState;
     use crate::tableau::Tableau;
@@ -725,59 +728,6 @@ After one draw-from-stock (move stack has one entry):");
     }
 
     /// Basic unit check: foundation move logic for Ace and non-Ace.
-
-    /// When moving the last face-up card off a column that still has hidden
-    /// cards, the newly exposed card must automatically flip to face-up.
-    ///
-    /// This test builds a small tableau column with three face-down cards
-    /// and one face-up card, moves the face-up card to another column via
-    /// a real `Move`, and checks that exactly one of the previously hidden
-    /// cards is now face-up.
-    #[test]
-    fn moving_last_face_up_card_flips_hidden_card() {
-        use crate::card::{Card, Rank, Suit};
-
-        let mut tab = Tableau::new_empty();
-
-        // Column 0: three face-down cards, then one face-up.
-        let col0 = &mut tab.columns[0];
-        col0.push(Card::new(Suit::Hearts, Rank::Ace), true);
-        col0.push(Card::new(Suit::Clubs, Rank::Two), true);
-        col0.push(Card::new(Suit::Spades, Rank::Three), true);
-        col0.push(Card::new(Suit::Diamonds, Rank::Four), false);
-
-        assert_eq!(col0.len(), 4);
-        assert_eq!(col0.num_face_down(), 3);
-        assert_eq!(col0.num_face_up(), 1);
-
-        // Column 1: empty destination pile.
-        let _col1 = &mut tab.columns[1];
-
-        // Move the single face-up card (the run starting at index 3) from
-        // column 0 to column 1 using a real ColumnToColumn move.
-        let mv = Move {
-            kind: MoveKind::ColumnToColumn {
-                src_col: 0,
-                src_index: 3, // top-based index of the face-up card
-                dst_col: 1,
-            },
-        };
-        mv.apply(&mut tab);
-
-        let col0_after = &tab.columns[0];
-        assert_eq!(col0_after.len(), 3, "one card removed from column 0");
-        assert_eq!(
-            col0_after.num_face_down(),
-            2,
-            "one of the previously hidden cards should have flipped face-up"
-        );
-        assert_eq!(
-            col0_after.num_face_up(),
-            1,
-            "exactly one face-up card should remain after the automatic flip"
-        );
-    }
-
     #[test]
     fn foundation_move_logic() {
         use crate::card::Suit::*;
@@ -794,5 +744,98 @@ After one draw-from-stock (move stack has one entry):");
         let f_idx = super::foundation_index_for(ah);
         tab.foundations[f_idx] = 1; // AH
         assert!(super::can_move_to_foundation(&tab, two_h));
+    }
+    #[test]
+    fn moving_last_face_up_card_flips_hidden_column_to_column() {
+        use crate::card::{Card, Suit::*, Rank::*};
+
+        let mut tab = Tableau::new_empty();
+
+        // Column 0: 2 hidden cards, 1 face-up card on top.
+        let col0 = &mut tab.columns[0];
+        col0.cards[0] = Card::new(Spades, Three);
+        col0.cards[1] = Card::new(Spades, Four);
+        col0.cards[2] = Card::new(Hearts, Five);
+        col0.len = 3;
+        col0.num_face_down = 2; // indices 0 and 1 hidden; index 2 face-up
+
+        // Column 1: empty; we will move the run starting at index 2 there.
+        let col1 = &mut tab.columns[1];
+        col1.len = 0;
+        col1.num_face_down = 0;
+
+        let mv = Move {
+            kind: MoveKind::ColumnToColumn {
+                src_col: 0,
+                src_index: 2,
+                dst_col: 1,
+            },
+        };
+
+        println!("=== moves::moving_last_face_up_card_flips_hidden_column_to_column ===");
+        println!("Initial tableau (C1 has 2 hidden + 1 face-up):");
+        print_tableau(&tab);
+
+        mv.apply(&mut tab);
+
+        println!("After ColumnToColumn move (run starting at index 2 -> C2):");
+        print_tableau(&tab);
+        let col0 = &tab.columns[0];
+        println!(
+            "Column 1: len={}, num_face_down={} (expected len=2, num_face_down=1)",
+            col0.len, col0.num_face_down
+        );
+
+        assert_eq!(col0.len, 2, "source column should have 2 cards left");
+        assert_eq!(
+            col0.num_face_down, 1,
+            "previously hidden top card should now be face-up",
+        );
+    }
+
+
+    /// When the last face-up card is moved from a column to the foundation,
+    /// the newly exposed card (if any) must be flipped face-up.
+    #[test]
+    fn moving_last_face_up_card_flips_hidden_column_to_foundation() {
+        use crate::card::{Card, Suit::*, Rank::*};
+
+        let mut tab = Tableau::new_empty();
+
+        // Column 0: 2 hidden cards, 1 face-up card on top.
+        let col0 = &mut tab.columns[0];
+        col0.cards[0] = Card::new(Spades, Three);
+        col0.cards[1] = Card::new(Spades, Four);
+        col0.cards[2] = Card::new(Hearts, Ace);
+        col0.len = 3;
+        col0.num_face_down = 2;
+
+        // Make AH playable to foundation.
+        let f_idx = super::foundation_index_for(Card::new(Hearts, Ace));
+        tab.foundations[f_idx] = 0; // empty foundation; Ace is next
+
+        let mv = Move {
+            kind: MoveKind::ColumnToFoundation { src_col: 0 },
+        };
+
+        println!("=== moves::moving_last_face_up_card_flips_hidden_column_to_foundation ===");
+        println!("Initial tableau (C1 has 2 hidden + AH face-up):");
+        print_tableau(&tab);
+
+        mv.apply(&mut tab);
+
+        println!("After ColumnToFoundation move (AH to foundation):");
+        print_tableau(&tab);
+        let col0 = &tab.columns[0];
+        println!(
+            "Column 1: len={}, num_face_down={} (expected len=2, num_face_down=1)",
+            col0.len, col0.num_face_down
+        );
+
+        assert_eq!(col0.len, 2, "source column should have 2 cards left");
+        assert_eq!(
+            col0.num_face_down, 1,
+            "previously hidden top card should now be face-up",
+        );
     }
 }

@@ -12,6 +12,27 @@ use crate::card::{Card, CARDS_PER_DECK};
 use crate::moves::Move;
 use crate::tableau::{Tableau, NUM_COLS};
 
+/// Why a search over this game may have stopped.
+///
+/// This is solver metadata; ordinary game mechanics do not depend on it,
+/// but it is useful for statistics and debugging.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TerminationReason {
+    /// All cards have been moved to the foundations in some branch.
+    Win,
+    /// All reachable tableaus were explored without finding a win.
+    /// In DFS terms: the search stack became empty with no win.
+    LossNoMoreMoves,
+    /// The search stopped because a configured node / move limit was hit.
+    MaxNodesReached,
+    /// The search stopped because a configured depth limit was hit.
+    MaxDepthReached,
+    /// The last branch could only generate already-visited tableaus, so
+    /// it was pruned entirely by loop detection.
+    LoopOnLastBranch,
+}
+
+
 /// 64-bit FNV-1a parameters.
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01B3;
@@ -109,6 +130,10 @@ pub struct GameState {
     pub moves: Vec<Move>,
     /// 64-bit hash of the current tableau, for fast loop detection.
     pub tableau_hash: u64,
+    /// If this state represents the end of a search, records why the search
+    /// stopped there. For interior nodes in the search tree this will
+    /// normally be `None`.
+    pub termination_reason: Option<TerminationReason>,
 }
 
 impl GameState {
@@ -121,6 +146,7 @@ impl GameState {
             tableau,
             moves: Vec::new(),
             tableau_hash,
+            termination_reason: None,
         }
     }
 
@@ -142,6 +168,7 @@ impl GameState {
             tableau,
             moves,
             tableau_hash,
+            termination_reason: None,
         }
     }
 
