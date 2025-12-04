@@ -50,7 +50,7 @@ impl Default for SearchLimits {
         SearchLimits {
             // max_nodes: 100_000,
             // max_depth: 256,
-            max_nodes: 1_600_000,
+            max_nodes: 1_024_000_000,
             max_depth: 4096,
         }
     }
