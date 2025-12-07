@@ -32,6 +32,10 @@ pub struct GameOutcome {
     pub max_branch_depth: u16,
     /// Maximum number of shelved game states (DFS stack size) observed.
     pub max_shelved: u64,
+    /// Number of leaf branches that ended with literally no legal moves.
+    pub dead_end_branches: u64,
+    /// Number of leaf branches that were pruned only by the visited set.
+    pub loop_pruned_branches: u64,
 }
 
 /// Limits for a search run. These prevent infinite exploration when there
@@ -50,7 +54,7 @@ impl Default for SearchLimits {
         SearchLimits {
             // max_nodes: 100_000,
             // max_depth: 256,
-            max_nodes: 1_024_000_000,
+            max_nodes: 204_800_000,
             max_depth: 4096,
         }
     }
@@ -134,12 +138,15 @@ pub fn solve_single_deck_with_config(
     let initial_state = GameState::new(initial_deck);
     let mut stack: Vec<GameState> = Vec::new();
     stack.push(initial_state.clone());
-
     // Additional statistics about the search.
     // Start with one shelved game state: the initial node on the DFS stack.
     let mut max_shelved: u64 = stack.len() as u64;
     // Track the deepest move sequence (branch depth) we ever explore.
     let mut max_branch_depth: u16 = 0;
+    // Branch-level leaf classification counters.
+    let mut dead_end_branches: u64 = 0;
+    let mut loop_pruned_branches: u64 = 0;
+
 
     // Visited set of tableau hashes for this starting deck.
     let mut visited: HashSet<u64> = HashSet::new();
@@ -156,12 +163,12 @@ pub fn solve_single_deck_with_config(
             termination = TerminationReason::MaxNodesReached;
             break;
         }
-
         // Track maximum branch depth (in moves) seen so far.
         let depth_here = state.moves.len() as u16;
         if depth_here > max_branch_depth {
             max_branch_depth = depth_here;
         }
+
 
         // Use the cached tableau directly.
         let tableau = state.current_tableau();
@@ -200,6 +207,8 @@ pub fn solve_single_deck_with_config(
                 termination: TerminationReason::Win,
                 max_branch_depth,
                 max_shelved,
+                dead_end_branches,
+                loop_pruned_branches,
             };
         }
 
@@ -214,6 +223,7 @@ pub fn solve_single_deck_with_config(
         let moves = generate_legal_moves(&tableau);
         if moves.is_empty() {
             // Dead end: no moves, not a win -> backtrack.
+            dead_end_branches += 1;
             termination = TerminationReason::LossNoMoreMoves;
             continue;
         }
@@ -233,7 +243,6 @@ pub fn solve_single_deck_with_config(
                 stack.push(child);
             }
         }
-
         // After pushing children, update the maximum number of shelved
         // game states (DFS stack size) observed so far.
         let shelved_here = stack.len() as u64;
@@ -241,9 +250,11 @@ pub fn solve_single_deck_with_config(
             max_shelved = shelved_here;
         }
 
+
         // If there were candidate moves but every child was rejected by the
         // visited-set, then this last step on the branch was purely a loop.
         if !any_new_child {
+            loop_pruned_branches += 1;
             termination = TerminationReason::LoopOnLastBranch;
         }
     }
@@ -257,6 +268,8 @@ pub fn solve_single_deck_with_config(
         termination,
         max_branch_depth,
         max_shelved,
+        dead_end_branches,
+        loop_pruned_branches,
     }
 }
 

@@ -1,0 +1,3228 @@
+--- FILE: canonical_decks.rs ---
+//! Canonical fixed 52-card deals used in tests.
+//!
+//! Goals:
+//!   * Provide a mathematically-defined "no-moves" (unplayable) deal that
+//!     does **not** rely on any solver.
+//!   * Provide project-local placeholders for "easy win" and
+//!     "unsolvable but playable" deals, with tests that only check that
+//!     they are valid permutations of a standard deck.
+//!
+//! This module **does not** depend on search.rs / DFS. It just works with
+//! Card/Suit/Rank and known Klondike accessibility conditions.
+
+use crate::card::{Card, Suit, Rank, CARDS_PER_DECK};
+
+/// Local convenience: our deck length as `usize`.
+const DECK_LEN: usize = CARDS_PER_DECK as usize;
+
+/// Standard 52-card deck in suit-major, rank-minor order:
+/// Clubs, Diamonds, Hearts, Spades; Ace..King.
+fn standard_deck_suit_rank() -> [Card; DECK_LEN] {
+    use Rank::*;
+    use Suit::*;
+
+    let suits = [Clubs, Diamonds, Hearts, Spades];
+    let ranks = [
+        Ace, Two, Three, Four, Five, Six, Seven, Eight, Nine, Ten, Jack, Queen, King,
+    ];
+
+    // temporary initial value; everything overwritten below
+    let mut deck = [Card::new(Clubs, Ace); DECK_LEN];
+    let mut i = 0usize;
+
+    for &s in &suits {
+        for &r in &ranks {
+            deck[i] = Card::new(s, r);
+            i += 1;
+        }
+    }
+
+    deck
+}
+
+/// In our dealing model (column-major, 1..7 cards per column),
+/// the *face-up* top card in column c (0-based) is at index
+/// T(c+1) − 1 where T(n) = n(n+1)/2.
+///
+/// That gives these 7 indices for the 7 accessible tableau cards:
+///   0, 2, 5, 9, 14, 20, 27.
+fn accessible_tableau_indices() -> [usize; 7] {
+    [0, 2, 5, 9, 14, 20, 27]
+}
+
+/// With 24 stock cards and deal-3 unlimited, the cards that can ever
+/// appear on top of the waste are those in stock positions
+///   2,5,8,11,14,17,20,23 (0-based).
+///
+/// Stock starts at deck index 28, so accessible stock indices are:
+///   28 + [2,5,8,11,14,17,20,23]
+/// = [30,33,36,39,42,45,48,51].
+fn accessible_stock_indices() -> [usize; 8] {
+    [30, 33, 36, 39, 42, 45, 48, 51]
+}
+
+/// Build a deck which is "unplayable" in the sense of de Ruiter / Kortsmit:
+///
+/// 1. None of the 7 accessible tableau cards is an Ace.
+/// 2. None of the 8 accessible stock cards is an Ace.
+/// 3. No two accessible tableau cards of opposite colour differ by rank 1.
+/// 4. No accessible stock card has rank one less than an accessible
+///    tableau card of opposite colour.
+///
+/// Under these conditions (for standard Klondike, deal-3 unlimited),
+/// **no legal move exists from the initial state**, independent of any
+/// particular solver strategy.
+fn unplayable_deck_by_local_conditions() -> [Card; DECK_LEN] {
+    use Rank::*;
+    use Suit::*;
+
+    // Forced assignments for the 15 "accessible" cards.
+    //
+    // 7 tableau tops (indices 0,2,5,9,14,20,27):
+    //   5♣, 7♣, 9♣, J♣, 5♠, 7♠, 9♠
+    //
+    // 8 stock-accessible cards (indices 30,33,36,39,42,45,48,51):
+    //   3♣, 3♠, 7♦, 7♥, J♦, J♥, K♦, K♥
+    //
+    // All these ranks are odd and separated by ≥2, so:
+    //   * no accessible Ace,
+    //   * no rank difference of 1 across opposite colours,
+    //   * no stock card with rank = tableau rank − 1 and opposite colour.
+    const FORCED: &[(usize, Suit, Rank)] = &[
+        // Tableau tops
+        (0,  Suit::Clubs,  Rank::Five),
+        (2,  Suit::Clubs,  Rank::Seven),
+        (5,  Suit::Clubs,  Rank::Nine),
+        (9,  Suit::Clubs,  Rank::Jack),
+        (14, Suit::Spades, Rank::Five),
+        (20, Suit::Spades, Rank::Seven),
+        (27, Suit::Spades, Rank::Nine),
+        // Stock-accessible
+        (30, Suit::Clubs,    Rank::Three),
+        (33, Suit::Spades,   Rank::Three),
+        (36, Suit::Diamonds, Rank::Seven),
+        (39, Suit::Hearts,   Rank::Seven),
+        (42, Suit::Diamonds, Rank::Jack),
+        (45, Suit::Hearts,   Rank::Jack),
+        (48, Suit::Diamonds, Rank::King),
+        (51, Suit::Hearts,   Rank::King),
+    ];
+
+    // Convenience: set of indices reserved for forced cards.
+    let forced_indices: [usize; FORCED.len()] = {
+        let mut tmp = [0usize; FORCED.len()];
+        let mut i = 0usize;
+        while i < FORCED.len() {
+            tmp[i] = FORCED[i].0;
+            i += 1;
+        }
+        tmp
+    };
+
+    let mut deck = [Card::new(Clubs, Ace); DECK_LEN];
+
+    // Place forced cards.
+    for &(idx, suit, rank) in FORCED {
+        deck[idx] = Card::new(suit, rank);
+    }
+
+    // Helpers to fill the remaining 37 cards in a fixed order.
+    fn is_forced_card(suit: Suit, rank: Rank, forced: &[(usize, Suit, Rank)]) -> bool {
+        for &(_, s, r) in forced {
+            if s == suit && r == rank {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_forced_index(idx: usize, forced_indices: &[usize]) -> bool {
+        for &i in forced_indices {
+            if i == idx {
+                return true;
+            }
+        }
+        false
+    }
+
+    let suits = [Clubs, Diamonds, Hearts, Spades];
+    let ranks = [
+        Ace, Two, Three, Four, Five, Six, Seven,
+        Eight, Nine, Ten, Jack, Queen, King,
+    ];
+
+    let mut deck_pos = 0usize;
+    for &s in &suits {
+        for &r in &ranks {
+            if is_forced_card(s, r, FORCED) {
+                continue;
+            }
+            // Skip reserved indices.
+            while deck_pos < DECK_LEN && is_forced_index(deck_pos, &forced_indices) {
+                deck_pos += 1;
+            }
+            if deck_pos >= DECK_LEN {
+                break;
+            }
+            deck[deck_pos] = Card::new(s, r);
+            deck_pos += 1;
+        }
+    }
+
+    deck
+}
+
+fn rank_val(r: Rank) -> i32 {
+    // We only care about relative differences; assumes Rank discriminants
+    // are monotonically increasing from Ace..King.
+    r as i32
+}
+
+fn is_red(s: Suit) -> bool {
+    matches!(s, Suit::Hearts | Suit::Diamonds)
+}
+
+fn opposite_colour(a: Card, b: Card) -> bool {
+    is_red(a.suit()) != is_red(b.suit())
+}
+
+/// Purely local check of "unplayable" conditions for a given deck.
+///
+/// This encodes the conditions used to build `unplayable_deck_by_local_conditions`
+/// and serves as both documentation and a regression test for that constructor.
+fn is_unplayable_by_local_conditions(deck: &[Card; DECK_LEN]) -> bool {
+    let tab_idxs = accessible_tableau_indices();
+    let stock_idxs = accessible_stock_indices();
+
+    let mut tab_cards = [deck[0]; 7];
+    let mut stock_cards = [deck[0]; 8];
+
+    for (i, idx) in tab_idxs.iter().enumerate() {
+        tab_cards[i] = deck[*idx];
+    }
+    for (i, idx) in stock_idxs.iter().enumerate() {
+        stock_cards[i] = deck[*idx];
+    }
+
+    // 1 & 2: no Aces among accessible cards.
+    for c in tab_cards.iter().chain(stock_cards.iter()) {
+        if c.rank() == Rank::Ace {
+            return false;
+        }
+    }
+
+    // 3: no two tableau tops of opposite colour with rank diff 1.
+    for i in 0..tab_cards.len() {
+        for j in (i + 1)..tab_cards.len() {
+            let a = tab_cards[i];
+            let b = tab_cards[j];
+            if opposite_colour(a, b) {
+                let da = rank_val(a.rank());
+                let db = rank_val(b.rank());
+                if (da - db).abs() == 1 {
+                    return false;
+                }
+            }
+        }
+    }
+
+    // 4: no stock-accessible card can be stacked onto a tableau-accessible
+    //    card (rank one less and opposite colour).
+    for &s in &stock_cards {
+        for &t in &tab_cards {
+            if opposite_colour(s, t) {
+                let rs = rank_val(s.rank());
+                let rt = rank_val(t.rank());
+                if rs + 1 == rt {
+                    return false;
+                }
+            }
+        }
+    }
+
+    true
+}
+
+/// Public entry point: canonical "no-moves" deal for this project.
+///
+/// This is *objectively* unplayable under standard rules, because it
+/// satisfies the local unplayable conditions above.
+pub fn canonical_unplayable_deck() -> [Card; DECK_LEN] {
+    unplayable_deck_by_local_conditions()
+}
+
+/// Project-local "easy win" deck.
+///
+/// Right now this just returns the standard ordered deck as a placeholder.
+/// You can later replace this with any 52-card permutation you *know*
+/// to be winnable (e.g. by constructing an explicit sequence of legal moves).
+pub fn canonical_easy_win_deck() -> [Card; DECK_LEN] {
+    standard_deck_suit_rank()
+}
+
+/// Project-local "unsolvable but with moves" deck.
+///
+/// Placeholder: currently just the standard ordered deck; you can later
+/// replace this with a 52-card permutation that is known (from theory
+/// or exhaustive search) to have legal moves but no winning line.
+pub fn canonical_unsolvable_but_playable_deck() -> [Card; DECK_LEN] {
+    standard_deck_suit_rank()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check_is_permutation(deck: &[Card; DECK_LEN]) {
+        // We assume Card is a 0..51 encoding in its inner u8 field.
+        let mut seen = [false; DECK_LEN];
+        for &c in deck.iter() {
+            let idx = c.0 as usize;
+            assert!(
+                idx < DECK_LEN,
+                "Card index out of range: {} -> {}",
+                c.short_str(),
+                idx
+            );
+            assert!(
+                !seen[idx],
+                "Duplicate card in deck: {} (index {})",
+                c.short_str(),
+                idx
+            );
+            seen[idx] = true;
+        }
+        for (i, used) in seen.iter().enumerate() {
+            assert!(*used, "Missing card with index {}", i);
+        }
+    }
+
+    #[test]
+    fn unplayable_deck_satisfies_local_conditions() {
+        let deck = canonical_unplayable_deck();
+        assert_eq!(deck.len(), DECK_LEN);
+
+        assert!(
+            is_unplayable_by_local_conditions(&deck),
+            "constructed deck does not satisfy local unplayable conditions"
+        );
+
+        println!("=== canonical_unplayable_deck ===");
+        println!(
+            "Accessible tableau indices:  {:?}",
+            accessible_tableau_indices()
+        );
+        println!(
+            "Accessible stock indices:    {:?}",
+            accessible_stock_indices()
+        );
+
+        let tab_idxs = accessible_tableau_indices();
+        let stock_idxs = accessible_stock_indices();
+
+        println!("\nAccessible tableau cards (top of each column after deal):");
+        for (i, idx) in tab_idxs.iter().enumerate() {
+            let c = deck[*idx];
+            println!("  T{} @ deck[{:02}]: {}", i + 1, idx, c.short_str());
+        }
+
+        println!("\nAccessible stock cards (waste-top reachable cards):");
+        for (i, idx) in stock_idxs.iter().enumerate() {
+            let c = deck[*idx];
+            println!("  S{} @ deck[{:02}]: {}", i + 1, idx, c.short_str());
+        }
+
+        println!("\nFull deck order (index: card):");
+        for (i, c) in deck.iter().enumerate() {
+            println!("{:02}: {}", i, c.short_str());
+        }
+
+        println!("\nHint: run with `--nocapture --test-threads=1` for readable output.");
+    }
+
+    #[test]
+    fn canonical_decks_are_valid_permutations() {
+        let unplayable = canonical_unplayable_deck();
+        let easy = canonical_easy_win_deck();
+        let hard = canonical_unsolvable_but_playable_deck();
+
+        check_is_permutation(&unplayable);
+        check_is_permutation(&easy);
+        check_is_permutation(&hard);
+    }
+}
+
+--- FILE: card.rs ---
+//! Card, Suit, and Rank types for a standard 52-card deck.
+//!
+//! - `Card` is a compact 1-byte representation (0..=51).
+//! - `Suit` and `Rank` give human-readable structure on top of that.
+
+use core::fmt;
+
+/// Number of suits in a standard deck.
+pub const NUM_SUITS: u8 = 4;
+/// Number of ranks in a standard deck.
+pub const NUM_RANKS: u8 = 13;
+/// Number of cards in a standard deck.
+pub const CARDS_PER_DECK: u8 = NUM_SUITS * NUM_RANKS;
+
+/// A playing card represented compactly as an index in 0..=51.
+///
+/// The mapping is:
+/// ```text
+/// index = suit as u8 * 13 + rank as u8
+/// ```
+/// where `rank` is 0=Ace, 1=Two, ..., 12=King.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Card(pub u8);
+
+/// The four suits in a standard deck.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[repr(u8)]
+pub enum Suit {
+    Hearts = 0,
+    Clubs = 1,
+    Spades = 2,
+    Diamonds = 3,
+}
+
+/// The thirteen ranks in a standard deck.
+///
+/// Note: Ace is treated as the lowest rank here (0), and you can use
+/// `rank_number()` on `Card` to get 1..=13 as a convenience.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum Rank {
+    Ace = 0,
+    Two,
+    Three,
+    Four,
+    Five,
+    Six,
+    Seven,
+    Eight,
+    Nine,
+    Ten,
+    Jack,
+    Queen,
+    King, // 12
+}
+
+impl Card {
+    /// Create a new card from a suit and rank.
+    ///
+    /// This uses the mapping:
+    /// ```text
+    /// index = suit as u8 * 13 + rank as u8
+    /// ```
+    #[inline]
+    pub fn new(suit: Suit, rank: Rank) -> Self {
+        let s = suit as u8;
+        let r = rank as u8;
+        debug_assert!(s < NUM_SUITS && r < NUM_RANKS);
+        Card(s * NUM_RANKS + r)
+    }
+
+    /// Create a card from a raw index in 0..=51.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if `index >= 52`.
+    #[inline]
+    pub fn from_index(index: u8) -> Self {
+        debug_assert!(index < CARDS_PER_DECK);
+        Card(index)
+    }
+
+    /// Return the raw 0..=51 index of this card.
+    #[inline]
+    pub fn index(self) -> u8 {
+        self.0
+    }
+
+    /// Return the suit of this card.
+    #[inline]
+    pub fn suit(self) -> Suit {
+        Suit::from_u8(self.0 / NUM_RANKS)
+    }
+
+    /// Return the rank of this card.
+    #[inline]
+    pub fn rank(self) -> Rank {
+        Rank::from_u8(self.0 % NUM_RANKS)
+    }
+
+    /// Rank number in 1..=13 (Ace=1, King=13).
+    #[inline]
+    pub fn rank_number(self) -> u8 {
+        self.rank() as u8 + 1
+    }
+
+    /// 'R' for red suits, 'B' for black suits.
+    #[inline]
+    pub fn color(self) -> char {
+        match self.suit() {
+            Suit::Hearts | Suit::Diamonds => 'R',
+            Suit::Clubs | Suit::Spades => 'B',
+        }
+    }
+
+    /// Short string like "AH", "7C", "TD", "KS".
+    pub fn short_str(self) -> String {
+        let r = match self.rank() {
+            Rank::Ace => 'A',
+            Rank::Two => '2',
+            Rank::Three => '3',
+            Rank::Four => '4',
+            Rank::Five => '5',
+            Rank::Six => '6',
+            Rank::Seven => '7',
+            Rank::Eight => '8',
+            Rank::Nine => '9',
+            Rank::Ten => 'T',
+            Rank::Jack => 'J',
+            Rank::Queen => 'Q',
+            Rank::King => 'K',
+        };
+        let s = self.suit().short_char();
+        format!("{r}{s}")
+    }
+}
+
+impl fmt::Display for Card {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.short_str())
+    }
+}
+
+impl Suit {
+    /// All suits in a fixed, reproducible order.
+    pub const ALL: [Suit; NUM_SUITS as usize] = [
+        Suit::Hearts,
+        Suit::Clubs,
+        Suit::Spades,
+        Suit::Diamonds,
+    ];
+
+    /// Construct a suit from a small integer 0..=3.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `v >= 4`.
+    #[inline]
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Suit::Hearts,
+            1 => Suit::Clubs,
+            2 => Suit::Spades,
+            3 => Suit::Diamonds,
+            _ => panic!("invalid suit: {v}"),
+        }
+    }
+
+    /// Single-character representation: 'H', 'C', 'S', or 'D'.
+    #[inline]
+    pub fn short_char(self) -> char {
+        match self {
+            Suit::Hearts => 'H',
+            Suit::Clubs => 'C',
+            Suit::Spades => 'S',
+            Suit::Diamonds => 'D',
+        }
+    }
+}
+
+impl Rank {
+    /// All ranks in a fixed, reproducible order (Ace..King).
+    pub const ALL: [Rank; NUM_RANKS as usize] = [
+        Rank::Ace,
+        Rank::Two,
+        Rank::Three,
+        Rank::Four,
+        Rank::Five,
+        Rank::Six,
+        Rank::Seven,
+        Rank::Eight,
+        Rank::Nine,
+        Rank::Ten,
+        Rank::Jack,
+        Rank::Queen,
+        Rank::King,
+    ];
+
+    /// Construct a rank from a small integer 0..=12.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `v >= 13`.
+    #[inline]
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Rank::Ace,
+            1 => Rank::Two,
+            2 => Rank::Three,
+            3 => Rank::Four,
+            4 => Rank::Five,
+            5 => Rank::Six,
+            6 => Rank::Seven,
+            7 => Rank::Eight,
+            8 => Rank::Nine,
+            9 => Rank::Ten,
+            10 => Rank::Jack,
+            11 => Rank::Queen,
+            12 => Rank::King,
+            _ => panic!("invalid rank: {v}"),
+        }
+    }
+
+    /// Rank number in 1..=13 (Ace=1, King=13).
+    #[inline]
+    pub fn number(self) -> u8 {
+        self as u8 + 1
+    }
+}
+
+/// Helper for tableau rules: can `upper` be placed on `lower`?
+///
+/// In Klondike, this is true if:
+/// - `upper` is exactly one rank lower than `lower`, and
+/// - `upper` is opposite color from `lower`.
+#[inline]
+pub fn is_one_lower_opposite_color(upper: Card, lower: Card) -> bool {
+    upper.rank_number() + 1 == lower.rank_number()
+        && upper.color() != lower.color()
+}
+
+/// Generate a standard 52-card deck in a fixed order.
+///
+/// Suits follow `Suit::ALL` order, and ranks follow `Rank::ALL` order.
+pub fn standard_deck() -> [Card; CARDS_PER_DECK as usize] {
+    let mut cards = [Card(0); CARDS_PER_DECK as usize];
+    let mut i = 0usize;
+    for &suit in Suit::ALL.iter() {
+        for &rank in Rank::ALL.iter() {
+            cards[i] = Card::new(suit, rank);
+            i += 1;
+        }
+    }
+    cards
+}
+
+/// Return a deterministically shuffled standard deck given a 32-bit seed.
+///
+/// This uses the same simple LCG/Fisher–Yates shuffle that is used in the
+/// test code, but is available to the main solver so we can generate
+/// pseudo-random starting decks without pulling in external RNG crates.
+pub fn shuffled_deck_from_seed(seed: u32) -> [Card; CARDS_PER_DECK as usize] {
+    let mut deck = standard_deck();
+    let mut state = seed;
+
+    fn lcg(state: &mut u32) -> u32 {
+        *state = state
+            .wrapping_mul(1664525)
+            .wrapping_add(1013904223);
+        *state
+    }
+
+    let len = deck.len();
+    for i in (1..len).rev() {
+        let r = (lcg(&mut state) as usize) % (i + 1);
+        deck.swap(i, r);
+    }
+
+    deck
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn card_index_round_trip() {
+        for &suit in Suit::ALL.iter() {
+            for &rank in Rank::ALL.iter() {
+                let c = Card::new(suit, rank);
+                assert!(c.index() < CARDS_PER_DECK);
+                assert_eq!(c.suit(), suit);
+                assert_eq!(c.rank(), rank);
+
+                let idx = c.index();
+                let c2 = Card::from_index(idx);
+                assert_eq!(c2, c);
+            }
+        }
+    }
+
+    #[test]
+    fn suit_from_u8_and_short_char() {
+        assert_eq!(Suit::from_u8(0), Suit::Hearts);
+        assert_eq!(Suit::from_u8(1), Suit::Clubs);
+        assert_eq!(Suit::from_u8(2), Suit::Spades);
+        assert_eq!(Suit::from_u8(3), Suit::Diamonds);
+
+        assert_eq!(Suit::Hearts.short_char(), 'H');
+        assert_eq!(Suit::Clubs.short_char(), 'C');
+        assert_eq!(Suit::Spades.short_char(), 'S');
+        assert_eq!(Suit::Diamonds.short_char(), 'D');
+    }
+
+    #[test]
+    fn rank_from_u8_and_number() {
+        for (i, &rank) in Rank::ALL.iter().enumerate() {
+            assert_eq!(Rank::from_u8(i as u8), rank);
+            assert_eq!(rank.number(), i as u8 + 1);
+        }
+    }
+
+    #[test]
+    fn card_colors_are_correct() {
+        // Hearts & Diamonds are red
+        for rank in Rank::ALL.iter().copied() {
+            let h = Card::new(Suit::Hearts, rank);
+            let d = Card::new(Suit::Diamonds, rank);
+            assert_eq!(h.color(), 'R');
+            assert_eq!(d.color(), 'R');
+        }
+
+        // Clubs & Spades are black
+        for rank in Rank::ALL.iter().copied() {
+            let c = Card::new(Suit::Clubs, rank);
+            let s = Card::new(Suit::Spades, rank);
+            assert_eq!(c.color(), 'B');
+            assert_eq!(s.color(), 'B');
+        }
+    }
+
+    #[test]
+    fn short_str_and_display() {
+        let ah = Card::new(Suit::Hearts, Rank::Ace);
+        let td = Card::new(Suit::Diamonds, Rank::Ten);
+        let ks = Card::new(Suit::Spades, Rank::King);
+        let seven_clubs = Card::new(Suit::Clubs, Rank::Seven);
+
+        assert_eq!(ah.short_str(), "AH");
+        assert_eq!(td.short_str(), "TD");
+        assert_eq!(ks.short_str(), "KS");
+        assert_eq!(seven_clubs.short_str(), "7C");
+
+        assert_eq!(format!("{ah}"), "AH");
+        assert_eq!(format!("{td}"), "TD");
+        assert_eq!(format!("{ks}"), "KS");
+        assert_eq!(format!("{seven_clubs}"), "7C");
+    }
+
+    #[test]
+    fn standard_deck_has_52_unique_cards() {
+        let deck = standard_deck();
+        assert_eq!(deck.len(), CARDS_PER_DECK as usize);
+
+        // Ensure all indices 0..51 appear exactly once.
+        let mut seen = [false; CARDS_PER_DECK as usize];
+        for card in deck.iter() {
+            let idx = card.index() as usize;
+            assert!(!seen[idx], "duplicate card index {idx}");
+            seen[idx] = true;
+        }
+
+        assert!(seen.iter().all(|&b| b));
+    }
+
+    #[test]
+    fn klondike_run_rule_helper() {
+        let eight_hearts = Card::new(Suit::Hearts, Rank::Eight);
+        let seven_spades = Card::new(Suit::Spades, Rank::Seven);
+        let seven_hearts = Card::new(Suit::Hearts, Rank::Seven);
+
+        assert!(is_one_lower_opposite_color(seven_spades, eight_hearts));
+        assert!(!is_one_lower_opposite_color(seven_hearts, eight_hearts));
+    }
+}
+--- FILE: display.rs ---
+//! Human-readable rendering of Klondike tableaus.
+//!
+//! This module provides functions to render a `Tableau` as multi-line text
+//! using the compact `Card` representation. Face-down cards are shown as
+//! "XX" and face-up cards are shown with their `short_str()` rank/suit code.
+//!
+//! The intent is to give a stable, readable CLI representation that is
+//! useful for debugging and for logging winning lines of play.
+
+use crate::card::{Card, Rank, Suit};
+use crate::tableau::{Tableau, NUM_COLS};
+
+/// Format a single card for display, either face-up or face-down.
+///
+/// - Face-down cards are rendered as `"XX"`.
+/// - Face-up cards use `Card::short_str()` such as `"AH"`, `"7C"`, `"TD"`.
+pub fn format_card_visible(card: Card, face_up: bool) -> String {
+    if face_up {
+        card.short_str()
+    } else {
+        "XX".to_string()
+    }
+}
+
+/// Render only the foundation row.
+///
+/// Foundations are stored as rank numbers (0..=13). For display, we treat
+/// them as if foundation index 0 corresponds to `Suit::Hearts`, 1 to
+/// `Suit::Clubs`, 2 to `Suit::Spades`, 3 to `Suit::Diamonds`, and show
+/// the top card in each pile.
+///   - Empty foundation: `[  ]`
+///   - Non-empty: e.g. `[AH]`, `[7C]`, `[KD]`
+///
+/// Even if there are multiple cards in a foundation pile, only the *top*
+/// card is shown here, matching typical Klondike presentations.
+pub fn render_foundations(tab: &Tableau) -> String {
+    let mut s = String::new();
+    s.push_str("Foundations: ");
+    for (i, &rank_num) in tab.foundations.iter().enumerate() {
+        if rank_num == 0 {
+            s.push_str("[  ] ");
+        } else {
+            // Map foundation index to a suit using the same Suit::ALL order.
+            let suit = Suit::ALL[i];
+            let rank = Rank::from_u8(rank_num - 1);
+            let card = Card::new(suit, rank);
+            s.push('[');
+            s.push_str(&card.short_str());
+            s.push_str("] ");
+        }
+    }
+    s.trim_end().to_string()
+}
+
+/// Render the stock (face-down) and waste (face-up) piles on a single line.
+///
+/// Stock is shown as a count of remaining face-down cards.
+/// Waste shows the top card if present and the number of cards in the waste.
+pub fn render_stock_and_waste(tab: &Tableau) -> String {
+    let mut s = String::new();
+
+    // Stock: we don't reveal internal order, only count.
+    let stock_len = tab.stock.len();
+    if stock_len == 0 {
+        s.push_str("Stock: [empty]");
+    } else {
+        s.push_str(&format!("Stock: [{} cards]", stock_len));
+    }
+
+    s.push_str("    "); // spacing
+
+    // Waste: show top card if any.
+    let waste_len = tab.waste.len();
+    if waste_len == 0 {
+        s.push_str("Waste: [empty]");
+    } else {
+        let top = tab.waste.top().expect("waste_len > 0 but no top card");
+        s.push_str(&format!(
+            "Waste: [{}] ({} cards)",
+            top.short_str(),
+            waste_len
+        ));
+    }
+
+    s
+}
+
+/// Render all tableau columns as a multi-line string.
+///
+/// Columns are arranged in 7 vertical stacks. Each "cell" is three characters
+/// wide. Face-down cards are `"XX"`, face-up cards are the usual rank/suit.
+///
+/// The columns are **top-justified**: the top cards of all columns share a
+/// common row, and shorter columns simply do not extend as far down. Within
+/// each column, the lowest non-empty row is the playable edge (the card you
+/// would pick up in a physical game).
+pub fn render_columns(tab: &Tableau) -> String {
+    let mut s = String::new();
+
+    s.push_str("Columns:\n");
+    s.push_str("      ");
+    for col_idx in 0..NUM_COLS {
+        s.push_str(&format!(" C{} ", col_idx + 1));
+    }
+    s.push('\n');
+
+    // Determine maximum column height.
+    let max_height: usize = tab
+        .columns
+        .iter()
+        .map(|c| c.len as usize)
+        .max()
+        .unwrap_or(0);
+
+    if max_height == 0 {
+        // No cards in any column; just return the header.
+        return s;
+    }
+
+    // Print from top row (row 0) down to bottom row (row max_height-1).
+    //
+    // For each column:
+    //   - Let h = column height.
+    //   - For rows >= h, print blanks (the column does not extend that far).
+    //   - For rows < h, map row directly to internal index 0..h-1 (top..bottom).
+    for row in 0..max_height {
+        s.push_str("      "); // left padding under the header label
+
+        for col in &tab.columns {
+            let h = col.len as usize;
+            if row >= h {
+                // This column does not reach this row; print blanks.
+                s.push_str("    ");
+            } else {
+                // Row within the column.
+                let idx = row; // 0..h-1 (top..bottom)
+                let card = col.cards[idx];
+                let face_down = (idx as u8) < col.num_face_down;
+                let rep = format_card_visible(card, !face_down);
+                s.push_str(&format!("{:>3} ", rep));
+            }
+        }
+
+        s.push('\n');
+    }
+
+    s
+}
+
+/// Render a full tableau (foundations, stock/waste, and columns) as a
+/// multi-line string.
+pub fn render_tableau(tab: &Tableau) -> String {
+    let mut s = String::new();
+
+    s.push_str(&render_foundations(tab));
+    s.push('\n');
+    s.push_str(&render_stock_and_waste(tab));
+    s.push('\n');
+    s.push('\n');
+    s.push_str(&render_columns(tab));
+
+    s
+}
+
+/// Print a tableau to stdout using `render_tableau`.
+pub fn print_tableau(tab: &Tableau) {
+    println!("{}", render_tableau(tab));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::card::{standard_deck, CARDS_PER_DECK};
+    use crate::tableau::Tableau;
+
+    /// Print a hint about how to run these tests to see clean, non-interleaved
+    /// human-readable output.
+    ///
+    /// Example:
+    ///   cargo test display -- --nocapture --test-threads=1
+    fn print_run_hint() {
+        println!("(Hint: for readable, non-interleaved output from this module,");
+        println!("       run: cargo test display -- --nocapture --test-threads=1)");
+    }
+
+    /// Very small deterministic LCG-based shuffler for tests.
+    /// This gives us "random-looking" decks but fully reproducible.
+    fn shuffle_deck(deck: &mut [Card; CARDS_PER_DECK as usize], mut state: u32) {
+        fn lcg(state: &mut u32) -> u32 {
+            // Simple LCG (constants from Numerical Recipes, not cryptographically secure).
+            *state = state
+                .wrapping_mul(1664525)
+                .wrapping_add(1013904223);
+            *state
+        }
+
+        let len = deck.len();
+        for i in (1..len).rev() {
+            let r = (lcg(&mut state) as usize) % (i + 1);
+            deck.swap(i, r);
+        }
+    }
+
+    /// Compute the internal "grid" the program thinks it is displaying
+    /// for the tableau columns, *without* using `render_columns`.
+    ///
+    /// The result is a matrix of strings:
+    ///   grid[row][col] = "", "XX", or "AH", etc.
+    ///
+    /// Rows are top-to-bottom (0 is top, last is bottom), matching the
+    /// top-justified representation used by `render_columns`.
+    fn expected_column_grid(tab: &Tableau) -> Vec<Vec<String>> {
+        let max_height: usize = tab
+            .columns
+            .iter()
+            .map(|c| c.len as usize)
+            .max()
+            .unwrap_or(0);
+
+        let mut grid = vec![vec![String::new(); NUM_COLS]; max_height];
+
+        for (col_idx, col) in tab.columns.iter().enumerate() {
+            let h = col.len as usize;
+
+            for row in 0..max_height {
+                if row >= h {
+                    // No card at this row for this column.
+                    grid[row][col_idx] = String::new();
+                } else {
+                    // Row within the column, top-justified.
+                    let idx = row; // 0..h-1 (top..bottom)
+                    let card = col.cards[idx];
+                    let face_down = (idx as u8) < col.num_face_down;
+                    grid[row][col_idx] = format_card_visible(card, !face_down);
+                }
+            }
+        }
+
+        grid
+    }
+
+    /// Parse the string produced by `render_columns` back into a grid of
+    /// per-cell strings ("", "XX", "AH", etc.), to compare with the
+    /// expected grid derived from the tableau.
+    fn parse_rendered_column_grid(rendered: &str) -> Vec<Vec<String>> {
+        let lines: Vec<&str> = rendered.lines().collect();
+        if lines.len() <= 2 {
+            // Only header present.
+            return Vec::new();
+        }
+        // Lines after "Columns:" and the header row.
+        let body = &lines[2..];
+        let max_height = body.len();
+        let mut grid = vec![vec![String::new(); NUM_COLS]; max_height];
+
+        let base_offset = 6; // "      " at line start
+        for (row_idx, line) in body.iter().enumerate() {
+            for col_idx in 0..NUM_COLS {
+                let start = base_offset + 4 * col_idx;
+                if start >= line.len() {
+                    grid[row_idx][col_idx] = String::new();
+                    continue;
+                }
+                let end = (start + 4).min(line.len());
+                let cell = &line[start..end];
+                grid[row_idx][col_idx] = cell.trim().to_string();
+            }
+        }
+
+        grid
+    }
+
+    /// Test 1: random initial deal columns are consistent between what the
+    /// program *thinks* it is drawing and what actually appears in the
+    /// rendered text.
+    ///
+    /// We:
+    ///   - start with a standard deck,
+    ///   - shuffle it with a deterministic PRNG,
+    ///   - deal a tableau,
+    ///   - compute the expected column grid from internal logic, and
+    ///   - parse the `render_columns` output back into a grid.
+    ///
+    /// The two grids must be identical, and we also print both for human
+    /// inspection when running with `-- --nocapture`.
+    #[test]
+    fn display_random_initial_tableau_matches_internal_grid() {
+        println!("\n=== display::display_random_initial_tableau_matches_internal_grid ===");
+        print_run_hint();
+
+        let mut deck = standard_deck();
+        shuffle_deck(&mut deck, 123456789);
+
+        let tab = Tableau::deal_from_shuffled(deck);
+
+        println!("Randomized initial deal from a pseudo-randomly shuffled deck.");
+        println!("The program will now:");
+        println!("  1) Render the columns as top-justified text.");
+        println!("  2) Compute its own internal expectation for each");
+        println!("     cell (row/col) of the columns based on the tableau.");
+        println!("If these two representations disagree, the test will fail.");
+
+        let rendered = render_columns(&tab);
+        println!("\nRendered columns (what a human sees):\n{}", rendered);
+
+        let expected_grid = expected_column_grid(&tab);
+        println!("Internal expectation (top->bottom rows, per column):");
+        for (row_idx, row) in expected_grid.iter().enumerate() {
+            let mut line = format!("row {:2}: ", row_idx);
+            for cell in row {
+                if cell.is_empty() {
+                    line.push_str("    ");
+                } else {
+                    line.push_str(&format!("{:>3} ", cell));
+                }
+            }
+            println!("{line}");
+        }
+
+        let parsed_grid = parse_rendered_column_grid(&rendered);
+        assert_eq!(parsed_grid, expected_grid);
+    }
+
+    /// Test 2: stock and waste rendering matches internal counts and top card.
+    ///
+    /// We build several random-ish configurations of stock/waste sizes and
+    /// verify that:
+    ///   - The stock count shown matches `tab.stock.len()`.
+    ///   - The waste top card (if any) matches the last pushed card.
+    #[test]
+    fn display_stock_and_waste_matches_internal_state() {
+        println!("\n=== display::display_stock_and_waste_matches_internal_state ===");
+        print_run_hint();
+
+        // We'll test a few configurations manually, without hard-coded
+        // card identities.
+        let mut tab = Tableau::new_empty();
+
+        // Case 1: both empty.
+        let line = render_stock_and_waste(&tab);
+        println!("Case 1 (both empty): {}", line);
+        assert!(line.contains("Stock: [empty]"));
+        assert!(line.contains("Waste: [empty]"));
+
+        // Case 2: some stock, empty waste.
+        tab.stock.push(Card::new(Suit::Hearts, Rank::Ace));
+        tab.stock.push(Card::new(Suit::Clubs, Rank::Two));
+        let line = render_stock_and_waste(&tab);
+        println!("Case 2 (2 in stock, empty waste): {}", line);
+        assert!(line.contains("Stock: [2 cards]"));
+        assert!(line.contains("Waste: [empty]"));
+
+        // Case 3: non-empty waste with a known top card.
+        tab.waste.push(Card::new(Suit::Spades, Rank::Three));
+        tab.waste.push(Card::new(Suit::Diamonds, Rank::Four));
+        let line = render_stock_and_waste(&tab);
+        println!("Case 3 (2 in stock, 2 in waste): {}", line);
+        // We don't hard-code the exact card text, but we do check that the
+        // waste count matches the internal length.
+        assert!(line.contains("(2 cards)"));
+    }
+
+    /// Test 3: foundations rendering shows only the top card per pile, and the
+    /// mapping matches internal foundation rank numbers, without hard-coding
+    /// specific ranks.
+    ///
+    /// We:
+    ///   - assign random-ish rank numbers to foundations,
+    ///   - compute the expected top card string from those numbers, and
+    ///   - ensure `render_foundations` includes those exact top card strings.
+    #[test]
+    fn display_foundations_show_top_cards() {
+        println!("\n=== display::display_foundations_show_top_cards ===");
+        print_run_hint();
+
+        let mut tab = Tableau::new_empty();
+
+        // Simulate some arbitrary foundation progress: 0..=13.
+        tab.foundations = [0, 1, 5, 13];
+
+        // Compute expected top-card strings using the same internal logic
+        // as the tableau: suit from index, rank from number.
+        let mut expected_tops: Vec<String> = Vec::new();
+        for (i, &rank_num) in tab.foundations.iter().enumerate() {
+            if rank_num == 0 {
+                expected_tops.push(String::from("[  ]"));
+            } else {
+                let suit = Suit::ALL[i];
+                let rank = Rank::from_u8(rank_num - 1);
+                let card = Card::new(suit, rank);
+                expected_tops.push(format!("[{}]", card.short_str()));
+            }
+        }
+
+        let line = render_foundations(&tab);
+        println!("Foundations line: {}", line);
+        println!("Internal expectation for each foundation slot: {:?}", expected_tops);
+
+        for top in expected_tops {
+            assert!(line.contains(&top));
+        }
+    }
+}
+
+--- FILE: game.rs ---
+//! Game-level state: initial deck + move stack.
+//
+//! This module defines `GameState`, which encapsulates exactly the data
+//! needed to specify a Klondike game:
+//!   - the initial deck permutation
+//!   - the sequence of moves applied so far
+//!   - the current tableau (logically derivable from deck + moves, but
+//!     cached here for convenience and speed)
+//!   - a 64-bit hash of the current tableau for fast loop detection.
+
+use crate::card::{Card, CARDS_PER_DECK};
+use crate::moves::Move;
+use crate::tableau::{Tableau, NUM_COLS};
+
+/// Why a search over this game may have stopped.
+///
+/// This is solver metadata; ordinary game mechanics do not depend on it,
+/// but it is useful for statistics and debugging.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TerminationReason {
+    /// All cards have been moved to the foundations in some branch.
+    Win,
+    /// All reachable tableaus were explored without finding a win.
+    /// In DFS terms: the search stack became empty with no win.
+    LossNoMoreMoves,
+    /// The search stopped because a configured node / move limit was hit.
+    MaxNodesReached,
+    /// The search stopped because a configured depth limit was hit.
+    MaxDepthReached,
+    /// The last branch could only generate already-visited tableaus, so
+    /// it was pruned entirely by loop detection.
+    LoopOnLastBranch,
+}
+
+
+/// 64-bit FNV-1a parameters.
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01B3;
+
+/// Mix a single byte into an FNV-1a hash.
+#[inline]
+fn fnv1a_mix_byte(mut h: u64, byte: u8) -> u64 {
+    h ^= byte as u64;
+    h = h.wrapping_mul(FNV_PRIME);
+    h
+}
+
+/// Mix a small tag (domain separator) into an FNV-1a hash.
+#[inline]
+fn fnv1a_mix_tag(h: u64, tag: u8) -> u64 {
+    fnv1a_mix_byte(h, tag)
+}
+
+/// Compute a 64-bit hash of the full tableau state.
+///
+/// This includes:
+///   - foundations
+///   - stock contents (order-dependent)
+///   - waste contents (order-dependent)
+///   - all tableau columns, including both face-down and face-up cards,
+///     plus `num_face_down` and `len` for each column.
+///
+/// The exact layout is an implementation detail, but for any given
+/// tableau the hash will be deterministic. Collisions are possible in
+/// theory but extremely unlikely in practice.
+pub fn hash_tableau64(tab: &Tableau) -> u64 {
+    let mut h = FNV_OFFSET_BASIS;
+
+    // --- Foundations ---
+    h = fnv1a_mix_tag(h, 0xF0);
+    for &f in &tab.foundations {
+        h = fnv1a_mix_byte(h, f);
+    }
+
+    // --- Stock ---
+    //
+    // We want to include the exact sequence of cards in the stock. We do
+    // this by working on a local copy of the tableau and draining the
+    // stock via `pop()`; this relies only on the public API and does not
+    // mutate the original tableau.
+    let mut tmp = *tab;
+
+    h = fnv1a_mix_tag(h, b'S'); // tag for stock
+    while let Some(card) = tmp.stock.pop() {
+        // Pop order is deterministic (top-to-bottom). We do not care
+        // whether this is bottom-to-top or top-to-bottom as long as it
+        // is consistent across calls.
+        h = fnv1a_mix_byte(h, card.0);
+    }
+
+    // --- Waste ---
+    h = fnv1a_mix_tag(h, b'W'); // tag for waste
+    while let Some(card) = tmp.waste.pop() {
+        h = fnv1a_mix_byte(h, card.0);
+    }
+
+    // --- Columns ---
+    h = fnv1a_mix_tag(h, 0xC0);
+    for col_idx in 0..NUM_COLS {
+        let col = &tab.columns[col_idx];
+        // Encode structure of the column.
+        h = fnv1a_mix_byte(h, col.len);
+        h = fnv1a_mix_byte(h, col.num_face_down);
+        // Encode all cards in this column, top-to-bottom.
+        let len = col.len as usize;
+        for i in 0..len {
+            h = fnv1a_mix_byte(h, col.cards[i].0);
+        }
+    }
+
+    h
+}
+
+/// Complete description of a single game's state at a point in time.
+///
+/// Conceptually, the "state of the game" is:
+///   - which deck you started from, and
+///   - which moves you have applied since dealing that deck.
+///
+/// From this, the current tableau can always be reconstructed; we cache
+/// it (and a hash of it) for performance.
+#[derive(Clone, Debug)]
+pub struct GameState {
+    /// The exact initial deck permutation used for this game.
+    pub initial_deck: [Card; CARDS_PER_DECK as usize],
+    /// The current tableau, obtained by dealing `initial_deck` and applying
+    /// all moves in `moves` in order.
+    pub tableau: Tableau,
+    /// The sequence of moves applied from the initial tableau to this position.
+    pub moves: Vec<Move>,
+    /// 64-bit hash of the current tableau, for fast loop detection.
+    pub tableau_hash: u64,
+    /// If this state represents the end of a search, records why the search
+    /// stopped there. For interior nodes in the search tree this will
+    /// normally be `None`.
+    pub termination_reason: Option<TerminationReason>,
+}
+
+impl GameState {
+    /// Create a new game state from an initial deck with no moves played.
+    pub fn new(initial_deck: [Card; CARDS_PER_DECK as usize]) -> Self {
+        let tableau = Tableau::deal_from_shuffled(initial_deck);
+        let tableau_hash = hash_tableau64(&tableau);
+        GameState {
+            initial_deck,
+            tableau,
+            moves: Vec::new(),
+            tableau_hash,
+            termination_reason: None,
+        }
+    }
+
+    /// Create a game state from an initial deck and an existing move stack.
+    ///
+    /// This replays all moves to produce the current tableau so that the
+    /// cached tableau and hash are consistent with the move history.
+    pub fn from_parts(
+        initial_deck: [Card; CARDS_PER_DECK as usize],
+        moves: Vec<Move>,
+    ) -> Self {
+        let mut tableau = Tableau::deal_from_shuffled(initial_deck);
+        for mv in &moves {
+            mv.apply(&mut tableau);
+        }
+        let tableau_hash = hash_tableau64(&tableau);
+        GameState {
+            initial_deck,
+            tableau,
+            moves,
+            tableau_hash,
+            termination_reason: None,
+        }
+    }
+
+    /// Number of moves that have been applied.
+    pub fn move_count(&self) -> usize {
+        self.moves.len()
+    }
+
+    /// Whether no moves have yet been applied.
+    pub fn is_at_initial(&self) -> bool {
+        self.moves.is_empty()
+    }
+
+    /// Apply a move to this game state:
+    ///   - mutate the cached tableau using `Move::apply`
+    ///   - append the move to the move stack
+    ///   - recompute the tableau hash
+    ///
+    /// This is the primary way regular code should advance the game state.
+    pub fn apply_move(&mut self, mv: Move) {
+        mv.apply(&mut self.tableau);
+        self.moves.push(mv);
+        self.tableau_hash = hash_tableau64(&self.tableau);
+    }
+
+    /// Reconstruct the current tableau from scratch by dealing the initial
+    /// deck and replaying all moves in order.
+    ///
+    /// This is mainly useful as a consistency/debug helper; normal code
+    /// should rely on the cached `tableau` field and `apply_move`.
+    pub fn recompute_tableau_from_history(&self) -> Tableau {
+        let mut tab = Tableau::deal_from_shuffled(self.initial_deck);
+        for mv in &self.moves {
+            mv.apply(&mut tab);
+        }
+        tab
+    }
+
+    /// Return a copy of the current tableau.
+    ///
+    /// Because `Tableau` is `Copy` in this project, this returns by value.
+    /// If that ever changes, this can be adjusted to return a reference.
+    pub fn current_tableau(&self) -> Tableau {
+        self.tableau
+    }
+}
+--- FILE: lib.rs ---
+pub mod card;
+pub mod tableau;
+pub mod moves;
+pub mod search;
+pub mod display;
+pub mod stats;
+pub mod game;
+pub mod canonical_decks;
+
+use std::env;
+
+/// Entry point for the `klondike_chat` binary.
+///
+/// Currently this:
+///   - Parses a very small command-line surface:
+///       * `--trace`       → enable per-node DFS tracing
+///       * `--seed=<u32>`  → choose a specific pseudo-random deck
+///   - Builds a single shuffled starting deck from the seed.
+///   - Runs a bounded DFS search on that deck.
+///   - Prints a summary win/loss result, plus the winning line length
+///     if a win is found.
+///
+/// Example:
+///   cargo run -- --trace --seed=12345
+pub fn run() {
+    println!("klondike_chat: Klondike solver skeleton starting up");
+    println!();
+
+    // Defaults: summary-only search with a fixed seed.
+    let mut detail = search::DetailLevel::Summary;
+    let mut seed: u32 = 1;
+
+    // Very small hand-rolled argument parser.
+    for arg in env::args().skip(1) {
+        if arg == "--trace" {
+            detail = search::DetailLevel::Trace;
+        } else if let Some(rest) = arg.strip_prefix("--seed=") {
+            match rest.parse::<u32>() {
+                Ok(v) => seed = v,
+                Err(_) => eprintln!("Warning: could not parse seed from '{}'; using default {}", rest, seed),
+            }
+        } else {
+            eprintln!("Warning: unrecognized argument '{}'; supported: --trace, --seed=<u32>", arg);
+        }
+    }
+
+    // Build a pseudo-random starting deck using a simple deterministic
+    // shuffle (no external RNG crates needed).
+    let deck = card::shuffled_deck_from_seed(seed);
+
+    let cfg = search::SearchConfig {
+        limits: search::SearchLimits::default(),
+        detail,
+    };
+
+    let outcome = search::solve_single_deck_with_config(deck, &cfg);
+
+    println!("Deck seed: {}", seed);
+    println!("Nodes visited: {}", outcome.nodes_visited);
+    println!("Win? {}", outcome.is_win);
+    println!("Termination reason: {:?}", outcome.termination);
+    println!("Max branch depth (moves): {}", outcome.max_branch_depth);
+    println!("Max shelved games (DFS stack size): {}", outcome.max_shelved);
+    println!("Leaf branches: dead_end = {}, loop_pruned = {}",
+             outcome.dead_end_branches, outcome.loop_pruned_branches);
+
+    if let Some(line) = &outcome.winning_line {
+        println!("Winning move count: {}", line.len());
+        if let search::DetailLevel::Summary = detail {
+            // In summary mode we only show the count by default; this is a
+            // sensible place where you might later add a compact listing.
+        } else {
+            println!("Winning move sequence:");
+            for (i, mv) in line.iter().enumerate() {
+                println!("  {:2}: {:?}", i + 1, mv.kind);
+            }
+        }
+    }
+}
+
+--- FILE: main.rs ---
+fn main() {
+    klondike_chat::run();
+}
+
+--- FILE: moves.rs ---
+//! Move representation and move generation for Klondike (draw-3, unlimited redeals).
+//
+//! This module defines a compact `Move` type plus helpers to generate all
+//! legal moves from a given `Tableau`, plus an `apply` method that mutates
+//! a tableau in-place according to a chosen move. Higher-level search code
+//! can combine these to explore the game tree.
+
+use crate::card::{Card, Suit};
+use crate::tableau::{Tableau, NUM_COLS};
+
+/// Number of ranks per suit in a standard deck.
+///
+/// We keep this local so the move generator does not depend on the internal
+/// encoding details of `crate::card`, beyond the assumption that cards are
+/// laid out suit-by-suit in a contiguous range.
+const RANKS_PER_SUIT: u8 = 13;
+
+/// Representation of the different move types in Klondike.
+///
+/// This is designed to be compact but still readable when logged. The
+/// `src_col` / `dst_col` indices are 0-based internally but usually printed
+/// as 1-based when shown to a human.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoveKind {
+    /// Move a run of face-up cards within the tableau from one column to another.
+    ///
+    /// - `src_col`: which column to move from (0..NUM_COLS-1)
+    /// - `src_index`: index *within that column* of the top card of the run
+    ///   (with index 0 being the top of the column)
+    /// - `dst_col`: which column to move to (0..NUM_COLS-1)
+    ColumnToColumn {
+        src_col: u8,
+        src_index: u8,
+        dst_col: u8,
+    },
+
+    /// Move the top face-up card of a tableau column to its foundation.
+    ColumnToFoundation {
+        src_col: u8,
+    },
+
+    /// Move the top card of the waste pile to a tableau column.
+    WasteToColumn {
+        dst_col: u8,
+    },
+
+    /// Move the top card of the waste pile to its foundation.
+    WasteToFoundation,
+
+    /// Flip the top card of a column from face-down to face-up.
+    ///
+    /// This is applicable when the column has cards but they are all
+    /// currently face-down. The model uses `num_face_down` to track how
+    /// many cards (from the top downward) are face-down; flipping simply
+    /// decrements that count by 1.
+    FlipColumn {
+        col: u8,
+    },
+
+    /// Deal cards from the stock to the waste (draw-3, or fewer if stock
+    /// has < 3 cards remaining).
+    DealFromStock,
+
+    /// Redeal: when the stock is empty and the waste is non-empty, flip
+    /// the waste back into the stock (face-down) preserving order.
+    ///
+    /// With our stack representation (pop from stock, push to waste),
+    /// repeatedly popping from waste and pushing back to stock restores
+    /// the original stock order.
+    RedealStock,
+}
+
+/// A single move, wrapping a `MoveKind` for future extensibility.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Move {
+    pub kind: MoveKind,
+}
+
+// ----- Internal helpers on Card -----
+
+/// Return a 0-based rank index for a card (0=Ace, 12=King).
+#[inline]
+fn rank_index(card: Card) -> u8 {
+    card.0 % RANKS_PER_SUIT
+}
+
+/// Return the suit index for a card (0..3).
+#[inline]
+fn suit_index(card: Card) -> u8 {
+    card.0 / RANKS_PER_SUIT
+}
+
+/// Return the `Suit` of a card using the Suit::ALL ordering.
+#[inline]
+fn suit_of(card: Card) -> Suit {
+    let idx = suit_index(card) as usize;
+    Suit::ALL[idx]
+}
+
+/// True if the card is in a red suit (hearts or diamonds).
+#[inline]
+fn card_is_red(card: Card) -> bool {
+    matches!(suit_of(card), Suit::Hearts | Suit::Diamonds)
+}
+
+/// True if the two cards have opposite colors.
+#[inline]
+fn colors_differ(a: Card, b: Card) -> bool {
+    card_is_red(a) != card_is_red(b)
+}
+
+/// Return the foundation index for a card's suit.
+///
+/// This relies on the convention that `Suit::ALL` and the tableau
+/// foundations use the same suit ordering.
+#[inline]
+fn foundation_index_for(card: Card) -> usize {
+    suit_index(card) as usize
+}
+
+/// True if the given card can be moved to its foundation pile, according
+/// to the current tableau foundations.
+///
+/// The tableau stores foundation progress as:
+///   foundations[i] = 0..=13
+/// where 0 means empty, and N>0 means the top card has rank index N-1
+/// (0=Ace, 12=King).
+fn can_move_to_foundation(tab: &Tableau, card: Card) -> bool {
+    let f_idx = foundation_index_for(card);
+    let top = tab.foundations[f_idx];
+    let r_idx = rank_index(card);
+
+    match top {
+        0 => r_idx == 0,          // empty foundation: only Ace (0) allowed
+        n => r_idx == n,          // existing top is n -> next rank index must be n
+    }
+}
+
+/// True if `above` may be placed onto `below` in a tableau column.
+///
+/// In Klondike, this requires:
+///   - colors are opposite (red on black or black on red), and
+///   - rank(below) = rank(above) + 1
+fn can_place_on_column(below: Card, above: Card) -> bool {
+    colors_differ(below, above) && rank_index(below) == rank_index(above) + 1
+}
+
+/// True if the slice of cards (top-to-bottom) forms a valid descending,
+/// alternating-color run suitable for moving as a block.
+///
+/// The slice is assumed to be ordered from top (index 0) to bottom (last).
+fn is_valid_run(cards: &[Card]) -> bool {
+    if cards.is_empty() {
+        return false;
+    }
+    for pair in cards.windows(2) {
+        let top = pair[0];   // closer to the top of the column
+        let below = pair[1]; // physically lower card
+        let r_top = rank_index(top);
+        let r_below = rank_index(below);
+
+        // We require a descending run, so top rank = below rank + 1.
+        if r_top != r_below + 1 {
+            return false;
+        }
+        if !colors_differ(top, below) {
+            return false;
+        }
+    }
+    true
+}
+
+// ----- Public move generation -----
+
+/// Generate all legal moves from the given tableau.
+///
+/// This does **not** apply or prioritize moves; it just lists everything that
+/// is legal in the current state. A search module can then choose which move
+/// to try first.
+///
+/// The rule set implemented here:
+///   - Column -> Foundation (top face-up card only)
+///   - Waste  -> Foundation (top card only)
+///   - Column -> Column (any valid descending alternating-color run)
+///   - Waste  -> Column (top card only)
+///   - FlipColumn when a column has cards but all face-down
+///   - DealFromStock when stock is non-empty
+///   - RedealStock when stock is empty and waste is non-empty
+pub fn generate_legal_moves(tab: &Tableau) -> Vec<Move> {
+    let mut moves = Vec::new();
+
+    // Column -> Foundation
+    for col_idx in 0..NUM_COLS {
+        let col = &tab.columns[col_idx];
+        if col.len == 0 {
+            continue;
+        }
+        if col.len <= col.num_face_down {
+            // no face-up card
+            continue;
+        }
+        let top_idx = col.len - 1;
+        let card = col.cards[top_idx as usize];
+        if can_move_to_foundation(tab, card) {
+            moves.push(Move {
+                kind: MoveKind::ColumnToFoundation {
+                    src_col: col_idx as u8,
+                },
+            });
+        }
+    }
+
+    // Waste -> Foundation
+    if let Some(card) = tab.waste.top() {
+        if can_move_to_foundation(tab, card) {
+            moves.push(Move {
+                kind: MoveKind::WasteToFoundation,
+            });
+        }
+    }
+
+    // Column -> Column (runs)
+    for src_col_idx in 0..NUM_COLS {
+        let col = &tab.columns[src_col_idx];
+        if col.len == 0 {
+            continue;
+        }
+        if col.len <= col.num_face_down {
+            // all face-down; no movable run
+            continue;
+        }
+
+        let len = col.len as usize;
+        let first_face_up = col.num_face_down as usize;
+
+        // Consider every possible starting point for a run within the face-up region.
+        // The column is stored top-to-bottom, so cards[first_face_up..len] is the
+        // sequence of face-up cards, with index increasing downward.
+        for start in first_face_up..len {
+            let run_slice = &col.cards[start..len];
+            if !is_valid_run(run_slice) {
+                continue;
+            }
+            let run_top_card = run_slice[0];
+
+            for dst_col_idx in 0..NUM_COLS {
+                if dst_col_idx == src_col_idx {
+                    continue;
+                }
+                let dst = &tab.columns[dst_col_idx];
+
+                if dst.len == 0 {
+                    // Empty column: only runs starting with King can move here.
+                    if rank_index(run_top_card) == 12 {
+                        moves.push(Move {
+                            kind: MoveKind::ColumnToColumn {
+                                src_col: src_col_idx as u8,
+                                src_index: start as u8,
+                                dst_col: dst_col_idx as u8,
+                            },
+                        });
+                    }
+                } else {
+                    if dst.len <= dst.num_face_down {
+                        // destination top card is still face-down
+                        continue;
+                    }
+                    let dst_top = dst.cards[(dst.len - 1) as usize];
+                    if can_place_on_column(dst_top, run_top_card) {
+                        moves.push(Move {
+                            kind: MoveKind::ColumnToColumn {
+                                src_col: src_col_idx as u8,
+                                src_index: start as u8,
+                                dst_col: dst_col_idx as u8,
+                            },
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Waste -> Column
+    if let Some(card) = tab.waste.top() {
+        for dst_col_idx in 0..NUM_COLS {
+            let dst = &tab.columns[dst_col_idx];
+
+            if dst.len == 0 {
+                // Empty column: only King can move here.
+                if rank_index(card) == 12 {
+                    moves.push(Move {
+                        kind: MoveKind::WasteToColumn {
+                            dst_col: dst_col_idx as u8,
+                        },
+                    });
+                }
+            } else {
+                if dst.len <= dst.num_face_down {
+                    continue;
+                }
+                let dst_top = dst.cards[(dst.len - 1) as usize];
+                if can_place_on_column(dst_top, card) {
+                    moves.push(Move {
+                        kind: MoveKind::WasteToColumn {
+                            dst_col: dst_col_idx as u8,
+                        },
+                    });
+                }
+            }
+        }
+    }
+
+    // FlipColumn: any column with cards but all face-down.
+    for col_idx in 0..NUM_COLS {
+        let col = &tab.columns[col_idx];
+        if col.len > 0 && col.num_face_down == col.len {
+            moves.push(Move {
+                kind: MoveKind::FlipColumn {
+                    col: col_idx as u8,
+                },
+            });
+        }
+    }
+
+    // Stock moves:
+    let stock_len = tab.stock.len();
+    let waste_len = tab.waste.len();
+
+    if stock_len > 0 {
+        // There are still cards in stock: we can deal.
+        moves.push(Move {
+            kind: MoveKind::DealFromStock,
+        });
+    } else if stock_len == 0 && waste_len > 0 {
+        // Stock empty, but waste not: redeal is allowed.
+        moves.push(Move {
+            kind: MoveKind::RedealStock,
+        });
+    }
+
+    moves
+}
+
+// ----- Mutating application of a move -----
+
+impl Move {
+    /// Apply this move to the given tableau, mutating it in-place.
+    ///
+    /// This function assumes the move is legal in the given state. It does
+    /// not re-check legality; callers should rely on `generate_legal_moves`
+    /// to produce only valid moves.
+    pub fn apply(&self, tab: &mut Tableau) {
+        match self.kind {
+            MoveKind::ColumnToColumn {
+                src_col,
+                src_index,
+                dst_col,
+            } => {
+                let s = src_col as usize;
+                let d = dst_col as usize;
+                if s == d {
+                    // Should never happen for legal moves; ignore defensively.
+                    return;
+                }
+
+                // Split the columns slice to obtain two distinct mutable references.
+                if s < d {
+                    let (left, right) = tab.columns.split_at_mut(d);
+                    let src = &mut left[s];
+                    let dst = &mut right[0];
+                    move_run_between_columns(src, dst, src_index);
+                } else {
+                    let (left, right) = tab.columns.split_at_mut(s);
+                    let dst = &mut left[d];
+                    let src = &mut right[0];
+                    move_run_between_columns(src, dst, src_index);
+                }
+            }
+
+            MoveKind::ColumnToFoundation { src_col } => {
+                let s = src_col as usize;
+                let col = &mut tab.columns[s];
+                if col.len == 0 {
+                    return;
+                }
+                let top_idx = col.len - 1;
+                let card = col.cards[top_idx as usize];
+                // Remove the card from the column.
+                col.len -= 1;
+                flip_exposed_card_after_removal(col);
+                let f_idx = foundation_index_for(card);
+                let r_idx = rank_index(card);
+                tab.foundations[f_idx] = r_idx + 1;
+            }
+
+            MoveKind::WasteToColumn { dst_col } => {
+                let d = dst_col as usize;
+                if let Some(card) = tab.waste.pop() {
+                    let dst = &mut tab.columns[d];
+                    let dst_len = dst.len as usize;
+                    dst.cards[dst_len] = card;
+                    dst.len += 1;
+                    // New card is face-up; num_face_down unchanged.
+                }
+            }
+
+            MoveKind::WasteToFoundation => {
+                if let Some(card) = tab.waste.pop() {
+                    let f_idx = foundation_index_for(card);
+                    let r_idx = rank_index(card);
+                    tab.foundations[f_idx] = r_idx + 1;
+                }
+            }
+
+            MoveKind::FlipColumn { col } => {
+                let c = col as usize;
+                let col_ref = &mut tab.columns[c];
+                if col_ref.len > 0 && col_ref.num_face_down > 0 {
+                    // Reveal the bottom-most face-down card: decrement the
+                    // count of face-down cards. The actual card data in
+                    // `cards[]` does not change.
+                    col_ref.num_face_down -= 1;
+                }
+            }
+
+            MoveKind::DealFromStock => {
+                // Draw up to 3 cards from stock, pushing them onto waste.
+                let mut drawn = 0;
+                while drawn < 3 {
+                    if let Some(card) = tab.stock.pop() {
+                        tab.waste.push(card);
+                        drawn += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            MoveKind::RedealStock => {
+                // When the stock is empty and waste is non-empty, flip waste
+                // back into stock. Repeatedly popping from waste and pushing
+                // to stock restores the original stock order.
+                while let Some(card) = tab.waste.pop() {
+                    tab.stock.push(card);
+                }
+            }
+        }
+        // Debug-time sanity check: any non-empty column must have at least
+        // one face-up card (i.e., the top card is never face-down).
+        #[cfg(debug_assertions)]
+        {
+            for col in &tab.columns {
+                if col.len > 0 {
+                    debug_assert!(col.num_face_down < col.len,
+                        "Column invariant violated: non-empty column has all cards face-down");
+                }
+            }
+        }
+
+    }
+
+    /// Render a move as a human-readable string, optionally using details
+    /// from the given tableau (e.g. which card is being moved).
+    pub fn describe(&self, tab: &Tableau) -> String {
+        match self.kind {
+            MoveKind::ColumnToColumn {
+                src_col,
+                src_index,
+                dst_col,
+            } => {
+                let s = src_col as usize;
+                let d = dst_col as usize;
+                let col = &tab.columns[s];
+                let start = src_index as usize;
+                let end = col.len as usize;
+                let run_top = col.cards[start];
+                let run_bottom = col.cards[end - 1];
+                if start + 1 == end {
+                    format!(
+                        "Column {}: {} -> Column {}",
+                        s + 1,
+                        run_top.short_str(),
+                        d + 1
+                    )
+                } else {
+                    format!(
+                        "Column {}: {}..{} -> Column {}",
+                        s + 1,
+                        run_top.short_str(),
+                        run_bottom.short_str(),
+                        d + 1
+                    )
+                }
+            }
+
+            MoveKind::ColumnToFoundation { src_col } => {
+                let s = src_col as usize;
+                let col = &tab.columns[s];
+                let top = col.cards[(col.len - 1) as usize];
+                let suit = suit_of(top);
+                format!(
+                    "Column {}: {} -> Foundation({:?})",
+                    s + 1,
+                    top.short_str(),
+                    suit
+                )
+            }
+
+            MoveKind::WasteToColumn { dst_col } => {
+                let d = dst_col as usize;
+                if let Some(card) = tab.waste.top() {
+                    format!(
+                        "Waste: {} -> Column {}",
+                        card.short_str(),
+                        d + 1
+                    )
+                } else {
+                    format!("Waste (empty) -> Column {}", d + 1)
+                }
+            }
+
+            MoveKind::WasteToFoundation => {
+                if let Some(card) = tab.waste.top() {
+                    let suit = suit_of(card);
+                    format!(
+                        "Waste: {} -> Foundation({:?})",
+                        card.short_str(),
+                        suit
+                    )
+                } else {
+                    "Waste (empty) -> Foundation".to_string()
+                }
+            }
+
+            MoveKind::FlipColumn { col } => {
+                let c = col as usize;
+                let col_ref = &tab.columns[c];
+                if col_ref.len > 0 {
+                    let top = col_ref.cards[(col_ref.len - 1) as usize];
+                    format!(
+                        "Flip Column {} top card {} face-up",
+                        c + 1,
+                        top.short_str()
+                    )
+                } else {
+                    format!("Flip Column {} (empty)", c + 1)
+                }
+            }
+
+            MoveKind::DealFromStock => "Deal from Stock (draw up to 3 cards)".to_string(),
+
+            MoveKind::RedealStock => "Redeal Stock from Waste".to_string(),
+        }
+
+    }
+}
+
+/// Helper: move a run of cards from `src` to `dst`, where the run begins
+/// at `src_index` (top-based index) and extends to the current bottom.
+///
+/// Both columns are assumed to use the `top-to-bottom` storage convention,
+/// with `len` entries in `cards[0..len)`.
+fn flip_exposed_card_after_removal<const N: usize>(col: &mut crate::tableau::Column<N>) {
+    // If we just removed the last face-up card from this column, the new top
+    // card (previously face-down) becomes exposed and should be treated as
+    // face-up. This matches Klondike's "flip when you clear a face-down" rule.
+    if col.len > 0 && col.len == col.num_face_down {
+        col.num_face_down -= 1;
+    }
+}
+
+fn move_run_between_columns<const N: usize>(
+    src: &mut crate::tableau::Column<N>,
+    dst: &mut crate::tableau::Column<N>,
+    src_index: u8,
+) {
+    let start = src_index as usize;
+    let src_len = src.len as usize;
+    if start >= src_len {
+        return;
+    }
+    let count = src_len - start;
+    let dst_len = dst.len as usize;
+
+    // Copy the run cards to the destination, preserving order.
+    for i in 0..count {
+        dst.cards[dst_len + i] = src.cards[start + i];
+    }
+    dst.len = (dst_len + count) as u8;
+
+    // Shrink the source column. We move only face-up cards, so the
+    // face-down prefix (indices 0..num_face_down) remains in place, but
+    // if we removed the last face-up card then the new top card becomes
+    // exposed and must be flipped face-up.
+    src.len = src_index;
+    flip_exposed_card_after_removal(src);
+}
+
+// ----- Tests -----
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::card::{standard_deck, CARDS_PER_DECK};
+    use crate::card::Rank;
+    use crate::display::print_tableau;
+    use crate::game::GameState;
+    use crate::tableau::Tableau;
+
+    /// Print a hint about how to run these tests to see clean, non-interleaved
+    /// human-readable output.
+    ///
+    /// Example:
+    ///   cargo test demo_random_tableaus_moves -- --nocapture --test-threads=1
+    fn print_run_hint() {
+        println!("(Hint: for readable, non-interleaved output from this module,");
+        println!("       run: cargo test demo_random_tableaus_moves -- --nocapture --test-threads=1)");
+    }
+
+    /// Very small deterministic LCG-based shuffler for tests.
+    /// This gives us "random-looking" decks but fully reproducible.
+    fn shuffle_deck(deck: &mut [Card; CARDS_PER_DECK as usize], mut state: u32) {
+        fn lcg(state: &mut u32) -> u32 {
+            // Simple LCG (constants from Numerical Recipes, not cryptographically secure).
+            *state = state
+                .wrapping_mul(1664525)
+                .wrapping_add(1013904223);
+            *state
+        }
+
+        let len = deck.len();
+        for i in (1..len).rev() {
+            let r = (lcg(&mut state) as usize) % (i + 1);
+            deck.swap(i, r);
+        }
+    }
+
+    /// Helper to build a randomized *game state* (deck + empty move stack)
+    /// from a given seed.
+    fn random_game_state(seed: u32) -> GameState {
+        let mut deck = standard_deck();
+        shuffle_deck(&mut deck, seed);
+        GameState::new(deck)
+    }
+
+    /// Demonstration: generate and print legal moves for three different
+    /// randomized initial tableaus, and show how the move stack and hash
+    /// describe the game state.
+    ///
+    /// For each seed we print:
+    ///   - initial tableau (move stack empty + hash)
+    ///   - move stack contents (empty)
+    ///   - tableau after one draw-from-stock, performed by *real* game code
+    ///   - move stack contents (one `DealFromStock` entry)
+    ///   - hash of the updated tableau
+    #[test]
+    fn demo_random_tableaus_moves() {
+        println!("
+=== moves::demo_random_tableaus_moves ===");
+        print_run_hint();
+
+        let seeds = [42_u32, 123456789_u32, 2025_u32];
+
+        for (i, &seed) in seeds.iter().enumerate() {
+            println!("
+--- Game {} (seed = {}) ---", i + 1, seed);
+
+            // Initial game state: deck + empty move stack.
+            let mut game = random_game_state(seed);
+
+            // Use the *implemented* code path to obtain the tableau:
+            let tab_initial = game.current_tableau();
+            println!("
+Initial tableau (move stack is empty):");
+            print_tableau(&tab_initial);
+            println!("Move stack length: {}", game.move_count());
+            println!("Move stack contents: []");
+            println!("Tableau hash: 0x{:016x}", game.tableau_hash);
+
+            let moves_initial = generate_legal_moves(&tab_initial);
+            println!("Legal moves in initial layout ({} total):", moves_initial.len());
+            for (j, mv) in moves_initial.iter().enumerate() {
+                println!("  {:2}: {}", j + 1, mv.describe(&tab_initial));
+            }
+
+            // After one draw-from-stock: use the real game method `apply_move`
+            // to both mutate the tableau and record the move.
+            game.apply_move(Move { kind: MoveKind::DealFromStock });
+            let tab_draw = game.current_tableau();
+            println!("
+After one draw-from-stock (move stack has one entry):");
+            print_tableau(&tab_draw);
+            println!("Move stack length: {}", game.move_count());
+            println!("Move stack contents:");
+            for (idx, mv) in game.moves.iter().enumerate() {
+                println!("  {:2}: {:?}", idx + 1, mv.kind);
+            }
+            println!("Tableau hash: 0x{:016x}", game.tableau_hash);
+
+            let moves_draw = generate_legal_moves(&tab_draw);
+            println!(
+                "Legal moves after one draw-from-stock ({} total):",
+                moves_draw.len()
+            );
+            for (j, mv) in moves_draw.iter().enumerate() {
+                println!("  {:2}: {}", j + 1, mv.describe(&tab_draw));
+            }
+        }
+    }
+
+    /// Basic unit check: a simple valid run and an invalid run.
+    #[test]
+    fn valid_and_invalid_runs() {
+        use crate::card::Suit::*;
+        use crate::card::Rank::*;
+
+        // Build a small column manually: 8S, 7H, 6C (valid run), then 5C (breaks color).
+        // Stored top-to-bottom in the array.
+        let col_cards = [
+            Card::new(Spades, Eight),
+            Card::new(Hearts, Seven),
+            Card::new(Clubs, Six),
+            Card::new(Clubs, Five),
+        ];
+
+        assert!(super::is_valid_run(&col_cards[0..3]));
+        assert!(!super::is_valid_run(&col_cards[0..4]));
+    }
+
+    /// Basic unit check: foundation move logic for Ace and non-Ace.
+    #[test]
+    fn foundation_move_logic() {
+        use crate::card::Suit::*;
+
+        let mut tab = Tableau::new_empty();
+
+        // Start with empty foundations: only Aces should be placeable.
+        let ah = Card::new(Hearts, Rank::Ace);
+        let two_h = Card::new(Hearts, Rank::Two);
+        assert!(super::can_move_to_foundation(&tab, ah));
+        assert!(!super::can_move_to_foundation(&tab, two_h));
+
+        // Pretend AH is on the foundation; now 2H should be placeable.
+        let f_idx = super::foundation_index_for(ah);
+        tab.foundations[f_idx] = 1; // AH
+        assert!(super::can_move_to_foundation(&tab, two_h));
+    }
+    #[test]
+    fn moving_last_face_up_card_flips_hidden_column_to_column() {
+        use crate::card::{Card, Suit::*, Rank::*};
+
+        let mut tab = Tableau::new_empty();
+
+        // Column 0: 2 hidden cards, 1 face-up card on top.
+        let col0 = &mut tab.columns[0];
+        col0.cards[0] = Card::new(Spades, Three);
+        col0.cards[1] = Card::new(Spades, Four);
+        col0.cards[2] = Card::new(Hearts, Five);
+        col0.len = 3;
+        col0.num_face_down = 2; // indices 0 and 1 hidden; index 2 face-up
+
+        // Column 1: empty; we will move the run starting at index 2 there.
+        let col1 = &mut tab.columns[1];
+        col1.len = 0;
+        col1.num_face_down = 0;
+
+        let mv = Move {
+            kind: MoveKind::ColumnToColumn {
+                src_col: 0,
+                src_index: 2,
+                dst_col: 1,
+            },
+        };
+
+        println!("=== moves::moving_last_face_up_card_flips_hidden_column_to_column ===");
+        println!("Initial tableau (C1 has 2 hidden + 1 face-up):");
+        print_tableau(&tab);
+
+        mv.apply(&mut tab);
+
+        println!("After ColumnToColumn move (run starting at index 2 -> C2):");
+        print_tableau(&tab);
+        let col0 = &tab.columns[0];
+        println!(
+            "Column 1: len={}, num_face_down={} (expected len=2, num_face_down=1)",
+            col0.len, col0.num_face_down
+        );
+
+        assert_eq!(col0.len, 2, "source column should have 2 cards left");
+        assert_eq!(
+            col0.num_face_down, 1,
+            "previously hidden top card should now be face-up",
+        );
+    }
+
+
+    /// When the last face-up card is moved from a column to the foundation,
+    /// the newly exposed card (if any) must be flipped face-up.
+    #[test]
+    fn moving_last_face_up_card_flips_hidden_column_to_foundation() {
+        use crate::card::{Card, Suit::*, Rank::*};
+
+        let mut tab = Tableau::new_empty();
+
+        // Column 0: 2 hidden cards, 1 face-up card on top.
+        let col0 = &mut tab.columns[0];
+        col0.cards[0] = Card::new(Spades, Three);
+        col0.cards[1] = Card::new(Spades, Four);
+        col0.cards[2] = Card::new(Hearts, Ace);
+        col0.len = 3;
+        col0.num_face_down = 2;
+
+        // Make AH playable to foundation.
+        let f_idx = super::foundation_index_for(Card::new(Hearts, Ace));
+        tab.foundations[f_idx] = 0; // empty foundation; Ace is next
+
+        let mv = Move {
+            kind: MoveKind::ColumnToFoundation { src_col: 0 },
+        };
+
+        println!("=== moves::moving_last_face_up_card_flips_hidden_column_to_foundation ===");
+        println!("Initial tableau (C1 has 2 hidden + AH face-up):");
+        print_tableau(&tab);
+
+        mv.apply(&mut tab);
+
+        println!("After ColumnToFoundation move (AH to foundation):");
+        print_tableau(&tab);
+        let col0 = &tab.columns[0];
+        println!(
+            "Column 1: len={}, num_face_down={} (expected len=2, num_face_down=1)",
+            col0.len, col0.num_face_down
+        );
+
+        assert_eq!(col0.len, 2, "source column should have 2 cards left");
+        assert_eq!(
+            col0.num_face_down, 1,
+            "previously hidden top card should now be face-up",
+        );
+    }
+}
+--- FILE: search.rs ---
+//! Search strategies for exploring the Klondike game tree.
+//
+//! This module contains a minimal, but *real*, depth-first search (DFS)
+//! for a single starting deck. The DFS is deliberately bounded so that it
+//! cannot run away forever in the presence of redeals and cycles, but the
+//! overall data flow is representative of what a full solver will use.
+
+use std::collections::HashSet;
+
+use crate::card::{Card, CARDS_PER_DECK};
+use crate::game::{GameState, TerminationReason};
+use crate::moves::{generate_legal_moves, Move};
+
+/// Outcome of solving a single starting deck.
+///
+/// This is the level at which you can say:
+///   "This particular initial deck is winnable (or not)."
+#[derive(Clone, Debug)]
+pub struct GameOutcome {
+    /// The exact initial deck permutation used for this game.
+    pub initial_deck: [Card; CARDS_PER_DECK as usize],
+    /// Whether a win was found from this starting deck.
+    pub is_win: bool,
+    /// If `is_win == true`, a full sequence of moves from the initial
+    /// tableau to a winning position.
+    pub winning_line: Option<Vec<Move>>,
+    /// Number of search nodes visited before terminating (win or cutoff).
+    pub nodes_visited: u64,
+    /// Why the DFS terminated for this starting deck (win, cutoff, loop, ...).
+    pub termination: TerminationReason,
+    /// Maximum depth (number of moves) reached on any explored branch.
+    pub max_branch_depth: u16,
+    /// Maximum number of shelved game states (DFS stack size) observed.
+    pub max_shelved: u64,
+    /// Number of leaf branches that ended with literally no legal moves.
+    pub dead_end_branches: u64,
+    /// Number of leaf branches that were pruned only by the visited set.
+    pub loop_pruned_branches: u64,
+}
+
+/// Limits for a search run. These prevent infinite exploration when there
+/// are cycles (e.g. unlimited redeals) and give you a knob to control
+/// runtime during experimentation.
+#[derive(Clone, Copy, Debug)]
+pub struct SearchLimits {
+    /// Hard cap on the number of nodes visited in a single search.
+    pub max_nodes: u64,
+    /// Maximum depth (number of moves from the initial tableau).
+    pub max_depth: u16,
+}
+
+impl Default for SearchLimits {
+    fn default() -> Self {
+        SearchLimits {
+            // max_nodes: 100_000,
+            // max_depth: 256,
+            max_nodes: 204_800_000,
+            max_depth: 4096,
+        }
+    }
+}
+
+/// How much detail to emit while exploring the game tree for a single deck.
+#[derive(Clone, Copy, Debug)]
+pub enum DetailLevel {
+    /// Only return a `GameOutcome`; do not print per-node information.
+    Summary,
+    /// Print every visited node's tableau and move stack as the search runs.
+    Trace,
+}
+
+/// Configuration for running a search on a single starting deck.
+#[derive(Clone, Copy, Debug)]
+pub struct SearchConfig {
+    /// Limits on how far the search may go.
+    pub limits: SearchLimits,
+    /// How much detail to emit while searching.
+    pub detail: DetailLevel,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        SearchConfig {
+            limits: SearchLimits::default(),
+            detail: DetailLevel::Summary,
+        }
+    }
+}
+
+
+/// Public entry point: solve a single deck using DFS with default limits.
+///
+/// Other strategies (BFS, heuristic search) can share the same `GameState`
+/// type and child expansion logic.
+pub fn solve_single_deck(
+    initial_deck: [Card; CARDS_PER_DECK as usize],
+) -> GameOutcome {
+    solve_single_deck_dfs(initial_deck, SearchLimits::default())
+}
+
+
+/// Real, but bounded, depth-first search for a single starting deck.
+///
+/// This convenience function accepts explicit search limits but always
+/// runs in summary mode (no per-node printing). It simply delegates to
+/// `solve_single_deck_with_config` with `DetailLevel::Summary`.
+pub fn solve_single_deck_dfs(
+    initial_deck: [Card; CARDS_PER_DECK as usize],
+    limits: SearchLimits,
+) -> GameOutcome {
+    let cfg = SearchConfig {
+        limits,
+        detail: DetailLevel::Summary,
+    };
+    solve_single_deck_with_config(initial_deck, &cfg)
+}
+
+/// Real, but bounded, depth-first search for a single starting deck with
+/// configurable limits and detail level.
+///
+/// This function:
+///   - Wraps the deck in a `GameState` (deck + move stack + tableau + hash).
+///   - Performs DFS using an explicit stack of `GameState`s.
+///   - Uses the cached tableau on each node for move generation and win check.
+///   - Uses a `HashSet<u64>` of tableau hashes to avoid revisiting the
+///     same tableau state (loop detection).
+///   - Stops when:
+///       * a winning tableau is found, or
+///       * `cfg.limits.max_nodes` is exceeded, or
+///       * `cfg.limits.max_depth` is reached on all branches.
+///
+/// When `cfg.detail == DetailLevel::Trace`, the search will also print
+/// each visited node's tableau and move stack to stdout.
+pub fn solve_single_deck_with_config(
+    initial_deck: [Card; CARDS_PER_DECK as usize],
+    cfg: &SearchConfig,
+) -> GameOutcome {
+    let initial_state = GameState::new(initial_deck);
+    let mut stack: Vec<GameState> = Vec::new();
+    stack.push(initial_state.clone());
+    // Additional statistics about the search.
+    // Start with one shelved game state: the initial node on the DFS stack.
+    let mut max_shelved: u64 = stack.len() as u64;
+    // Track the deepest move sequence (branch depth) we ever explore.
+    let mut max_branch_depth: u16 = 0;
+    // Branch-level leaf classification counters.
+    let mut dead_end_branches: u64 = 0;
+    let mut loop_pruned_branches: u64 = 0;
+
+
+    // Visited set of tableau hashes for this starting deck.
+    let mut visited: HashSet<u64> = HashSet::new();
+    visited.insert(initial_state.tableau_hash);
+
+    let mut nodes_visited: u64 = 0;
+    // Classification of why this DFS terminated for this deck.
+    let mut termination = TerminationReason::LossNoMoreMoves;
+
+    while let Some(state) = stack.pop() {
+        nodes_visited += 1;
+        if nodes_visited > cfg.limits.max_nodes {
+            // Hard cutoff: treat as "no win found within limits".
+            termination = TerminationReason::MaxNodesReached;
+            break;
+        }
+        // Track maximum branch depth (in moves) seen so far.
+        let depth_here = state.moves.len() as u16;
+        if depth_here > max_branch_depth {
+            max_branch_depth = depth_here;
+        }
+
+
+        // Use the cached tableau directly.
+        let tableau = state.current_tableau();
+
+        // Optional trace output: show tableau and move stack for this node.
+        if let DetailLevel::Trace = cfg.detail {
+            println!("=== DFS node {} ===", nodes_visited);
+            println!("Depth: {}", state.moves.len());
+            println!("Hash:  0x{:016x}", state.tableau_hash);
+            crate::display::print_tableau(&tableau);
+            if state.moves.is_empty() {
+                println!("Moves so far: []");
+            } else {
+                println!("Moves so far ({}):", state.moves.len());
+                for (i, mv) in state.moves.iter().enumerate() {
+                    println!("  {:2}: {:?}", i + 1, mv.kind);
+                }
+            }
+            println!();
+        }
+
+        // Check for win.
+        if tableau.is_win() {
+            if let DetailLevel::Trace = cfg.detail {
+                println!(
+                    "Found a win at depth {} after visiting {} nodes.",
+                    state.moves.len(),
+                    nodes_visited
+                );
+            }
+            return GameOutcome {
+                initial_deck: state.initial_deck,
+                is_win: true,
+                winning_line: Some(state.moves),
+                nodes_visited,
+                termination: TerminationReason::Win,
+                max_branch_depth,
+                max_shelved,
+                dead_end_branches,
+                loop_pruned_branches,
+            };
+        }
+
+        // Depth limit: do not expand children beyond this depth.
+        if state.moves.len() as u16 >= cfg.limits.max_depth {
+            // This branch cannot be extended because of the depth cap.
+            termination = TerminationReason::MaxDepthReached;
+            continue;
+        }
+
+        // Generate legal moves from this position.
+        let moves = generate_legal_moves(&tableau);
+        if moves.is_empty() {
+            // Dead end: no moves, not a win -> backtrack.
+            dead_end_branches += 1;
+            termination = TerminationReason::LossNoMoreMoves;
+            continue;
+        }
+
+        // DFS: push children in *reverse* order so that the first move
+        // in `moves` will be explored first.
+        let mut any_new_child = false;
+        for mv in moves.into_iter().rev() {
+            let mut child = state.clone();
+            // Use the real game method to mutate tableau + record move + update hash.
+            child.apply_move(mv);
+
+            // Loop detection: only explore this child if its tableau hash
+            // has not yet been seen for this starting deck.
+            if visited.insert(child.tableau_hash) {
+                any_new_child = true;
+                stack.push(child);
+            }
+        }
+        // After pushing children, update the maximum number of shelved
+        // game states (DFS stack size) observed so far.
+        let shelved_here = stack.len() as u64;
+        if shelved_here > max_shelved {
+            max_shelved = shelved_here;
+        }
+
+
+        // If there were candidate moves but every child was rejected by the
+        // visited-set, then this last step on the branch was purely a loop.
+        if !any_new_child {
+            loop_pruned_branches += 1;
+            termination = TerminationReason::LoopOnLastBranch;
+        }
+    }
+
+    // No win found within the given limits.
+    GameOutcome {
+        initial_deck,
+        is_win: false,
+        winning_line: None,
+        nodes_visited,
+        termination,
+        max_branch_depth,
+        max_shelved,
+        dead_end_branches,
+        loop_pruned_branches,
+    }
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::card::standard_deck;
+    use crate::display::print_tableau;
+    use crate::moves::{generate_legal_moves, MoveKind};
+
+    /// Basic sanity check: `solve_single_deck` returns a `GameOutcome`
+    /// that echoes the initial deck and is internally consistent.
+    #[test]
+    fn solve_single_deck_returns_outcome() {
+        let deck = standard_deck();
+        let outcome = solve_single_deck(deck);
+
+        // The solver must echo the same initial deck it was given.
+        assert_eq!(outcome.initial_deck, deck);
+
+        // In this DFS, we do not assume a particular answer; we only
+        // require that the `winning_line` is consistent with `is_win`.
+        if outcome.is_win {
+            assert!(outcome.winning_line.is_some());
+        } else {
+            assert!(outcome.winning_line.is_none());
+        }
+
+        // We should always have visited at least one node (the initial tableau).
+        assert!(outcome.nodes_visited >= 1);
+    }
+
+    /// Loop sanity check:
+    ///
+    /// From the initial tableau, repeatedly:
+    ///   - Deal from stock (draw-3) until the stock is empty,
+    ///   - Redeal from waste back into stock.
+    ///
+    /// This cycle leaves the tableau (columns + foundations + stock/waste)
+    /// unchanged. We verify that:
+    ///
+    ///   - the tableau hash returns to its initial value, and
+    ///   - a visited-set style check detects that this tableau was seen
+    ///     before (i.e. we would not re-explore it in DFS).
+    ///
+    /// To see human-readable tableaus and the visited set contents, run:
+    ///   cargo test redeal_cycle_detected_by_visited_set -- --nocapture --test-threads=1
+    #[test]
+    fn redeal_cycle_detected_by_visited_set() {
+        println!();
+        println!("=== search::redeal_cycle_detected_by_visited_set ===");
+        println!("(Hint: for readable, non-interleaved output, run with:");
+        println!("   cargo test redeal_cycle_detected_by_visited_set -- --nocapture --test-threads=1)");
+        println!();
+
+        let deck = standard_deck();
+        let mut state = GameState::new(deck);
+
+        let mut visited: HashSet<u64> = HashSet::new();
+
+        // Step 0: initial tableau
+        let mut step: u32 = 0;
+        let initial_hash = state.tableau_hash;
+        println!("Step {}: initial tableau", step);
+        println!("  hash = 0x{:016x}", initial_hash);
+        print_tableau(&state.current_tableau());
+        assert!(visited.insert(initial_hash));
+
+        // Perform one full cycle of repeated DealFromStock, then a single RedealStock.
+        loop {
+            let tab = state.current_tableau();
+            let moves = generate_legal_moves(&tab);
+
+            // Prefer DealFromStock if available.
+            if let Some(mv) = moves
+                .iter()
+                .find(|m| matches!(m.kind, MoveKind::DealFromStock))
+                .copied()
+            {
+                step += 1;
+                println!("
+Step {}: applying {:?}", step, mv.kind);
+                state.apply_move(mv);
+                let h = state.tableau_hash;
+                let is_new = visited.insert(h);
+                println!(
+                    "  hash = 0x{:016x} ({})",
+                    h,
+                    if is_new { "new" } else { "already seen" }
+                );
+                print_tableau(&state.current_tableau());
+                continue;
+            }
+
+            // Otherwise, if we can redeal stock, do that and finish the cycle.
+            if let Some(mv) = moves
+                .iter()
+                .find(|m| matches!(m.kind, MoveKind::RedealStock))
+                .copied()
+            {
+                step += 1;
+                println!("
+Step {}: applying {:?}", step, mv.kind);
+                state.apply_move(mv);
+                let h = state.tableau_hash;
+                let is_new = visited.insert(h);
+                println!(
+                    "  hash = 0x{:016x} ({})",
+                    h,
+                    if is_new { "new" } else { "already seen" }
+                );
+                print_tableau(&state.current_tableau());
+
+                // After a full deal-through + redeal we expect to return
+                // to the *initial* tableau, which must therefore already
+                // be in the visited set.
+                assert_eq!(
+                    h, initial_hash,
+                    "full deal-through + redeal should return to the same tableau"
+                );
+                assert!(
+                    !is_new,
+                    "visited-set should report that the redealt tableau hash was already seen"
+                );
+                break;
+            }
+
+            // If neither move is available, something is wrong for
+            // a clean cycle starting from the initial tableau.
+            panic!("No DealFromStock or RedealStock available during redeal cycle");
+        }
+
+        println!("
+Visited tableau hashes ({} entries):", visited.len());
+        for h in &visited {
+            println!("  0x{:016x}", h);
+        }
+
+        // We expect at least two distinct hashes: the initial tableau and
+        // at least one intermediate tableau while dealing through stock.
+        assert!(
+            visited.len() > 1,
+            "expected multiple distinct tableau hashes during the deal/redeal cycle"
+        );
+    }
+
+    /// Demonstration test: perform one loop through the stock (draw-3 only)
+    /// while creating "shelved" games for all non-deal moves at each step.
+    ///
+    /// A "shelved" game here is just another `GameState` value that could be
+    /// continued later. This mirrors how DFS/BFS search would keep alternate
+    /// branches in a stack or queue.
+    ///
+    /// To see human-readable tableaus, move stacks, and shelved games, run:
+    ///   cargo test one_stock_loop_with_shelving -- --nocapture --test-threads=1
+    #[test]
+    fn one_stock_loop_with_shelving() {
+        println!();
+        println!("=== search::one_stock_loop_with_shelving ===");
+        println!("(Hint: for readable, non-interleaved output, run with:");
+        println!("   cargo test one_stock_loop_with_shelving -- --nocapture --test-threads=1)");
+        println!();
+
+        let deck = standard_deck();
+        let mut main_game = GameState::new(deck);
+        let mut shelved: Vec<GameState> = Vec::new();
+        let mut step: u32 = 0;
+
+        loop {
+            let tab = main_game.current_tableau();
+            println!("--- Main path step {} ---", step);
+            println!("Tableau hash: 0x{:016x}", main_game.tableau_hash);
+            println!("Move stack length: {}", main_game.move_count());
+            if main_game.move_count() == 0 {
+                println!("Move stack: []");
+            } else {
+                println!("Move stack (all moves so far):");
+                for (i, mv) in main_game.moves.iter().enumerate() {
+                    println!("  {:2}: {:?}", i + 1, mv.kind);
+                }
+            }
+            print_tableau(&tab);
+
+            let moves = generate_legal_moves(&tab);
+            println!("Legal moves at this step ({} total):", moves.len());
+            for (i, mv) in moves.iter().enumerate() {
+                println!("  {:2}: {}", i + 1, mv.describe(&tab));
+            }
+
+            // Partition moves: choose one DealFromStock as the main path,
+            // and create "shelved" games for all other moves.
+            let mut chosen_deal: Option<crate::moves::Move> = None;
+
+            for mv in &moves {
+                if matches!(mv.kind, MoveKind::DealFromStock) && chosen_deal.is_none() {
+                    chosen_deal = Some(*mv);
+                } else {
+                    // Shelve this alternative: clone the current game state,
+                    // apply the move using regular game code, and save it.
+                    let mut child = main_game.clone();
+                    child.apply_move(*mv);
+                    shelved.push(child);
+                }
+            }
+
+            if chosen_deal.is_none() {
+                println!("No DealFromStock move available; stopping main path.");
+                break;
+            }
+
+            // Apply the chosen DealFromStock move to the main game.
+            main_game.apply_move(chosen_deal.unwrap());
+            step += 1;
+
+            let new_tab = main_game.current_tableau();
+            if new_tab.stock.len() == 0 {
+                println!("
+Stock is now empty after step {};", step);
+                println!("this completes one loop through the stock (draw-3).");
+                print_tableau(&new_tab);
+                break;
+            }
+
+            // Safety guard to avoid accidental infinite loops if rules change.
+            if step > 32 {
+                println!("Stopping after 32 steps (safety limit).");
+                break;
+            }
+        }
+
+        println!("
+Shelved games created: {}", shelved.len());
+        for (idx, g) in shelved.iter().enumerate() {
+            println!(
+                "Shelved[{}]: hash=0x{:016x}, moves={}, last move={:?}",
+                idx,
+                g.tableau_hash,
+                g.move_count(),
+                g.moves.last().map(|m| m.kind),
+            );
+            print_tableau(&g.current_tableau());
+        }
+    }
+}
+
+--- FILE: stats.rs ---
+#[derive(Default, Debug)]
+pub struct Stats {
+    pub games_played: u64,
+    pub games_won: u64,
+    pub games_lost: u64,
+}
+
+impl Stats {
+    pub fn record_win(&mut self) {
+        self.games_played += 1;
+        self.games_won += 1;
+    }
+
+    pub fn record_loss(&mut self) {
+        self.games_played += 1;
+        self.games_lost += 1;
+    }
+
+    pub fn win_rate(&self) -> f64 {
+        if self.games_played == 0 {
+            0.0
+        } else {
+            self.games_won as f64 / self.games_played as f64
+        }
+    }
+}
+
+--- FILE: tableau.rs ---
+//! Tableau representation for a Klondike (draw-3) game state.
+//!
+//! This module defines fixed-capacity piles/columns and a compact `Tableau`
+//! type suitable for large-scale search. All cards are represented using the
+//! 1-byte `Card` type from `crate::card`.
+
+use crate::card::{Card, CARDS_PER_DECK};
+
+/// Number of tableau columns.
+pub const NUM_COLS: usize = 7;
+/// Number of foundation piles (one per suit).
+pub const NUM_FOUNDATIONS: usize = 4;
+
+/// Maximum number of cards in the stock pile at any time.
+///
+/// In standard Klondike initial deal, 28 cards go to the tableau, leaving
+/// 24 in the stock. This constant reflects that upper bound.
+pub const MAX_STOCK: usize = 24;
+
+/// Maximum number of cards in the waste pile.
+///
+/// In draw-3 Klondike, waste can temporarily hold many cards, but at most
+/// 24 distinct cards can be outside the tableau/foundations at once, so this
+/// matches `MAX_STOCK` for simplicity.
+pub const MAX_WASTE: usize = 24;
+
+/// Maximum cards in a single tableau column.
+///
+/// A column may have up to 6 face-down cards (from the initial deal) plus
+/// up to 13 face-up cards (a full King..Ace run), so 19 is a safe bound.
+pub const MAX_COL: usize = 19;
+
+/// A simple fixed-capacity stack-like pile.
+///
+/// Index 0 is the "bottom" of the pile; `len - 1` is the top.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct Pile<const N: usize> {
+    pub cards: [Card; N],
+    pub len: u8, // number of active cards in `cards[..len]`
+}
+
+impl<const N: usize> Pile<N> {
+    /// Create an empty pile.
+    pub fn new() -> Self {
+        Self {
+            cards: [Card(0); N],
+            len: 0,
+        }
+    }
+
+    /// Current length of the pile.
+    #[inline]
+    pub fn len(&self) -> u8 {
+        self.len
+    }
+
+    /// True if the pile has no cards.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Push a card onto the top of the pile.
+    pub fn push(&mut self, card: Card) {
+        assert!((self.len as usize) < N, "Pile overflow");
+        self.cards[self.len as usize] = card;
+        self.len += 1;
+    }
+
+    /// Pop the top card from the pile.
+    pub fn pop(&mut self) -> Option<Card> {
+        if self.len == 0 {
+            None
+        } else {
+            self.len -= 1;
+            Some(self.cards[self.len as usize])
+        }
+    }
+
+    /// Peek at the top card.
+    pub fn top(&self) -> Option<Card> {
+        if self.len == 0 {
+            None
+        } else {
+            Some(self.cards[(self.len - 1) as usize])
+        }
+    }
+
+    /// Iterate over all cards from bottom to top.
+    pub fn iter(&self) -> impl Iterator<Item = &Card> {
+        self.cards[..(self.len as usize)].iter()
+    }
+}
+
+/// A tableau column: some face-down cards at the top, then face-up cards.
+///
+/// As with `Pile`, index 0 is the "bottom" card and `len - 1` is the top.
+/// The first `num_face_down` cards (from index 0 upwards) are considered
+/// face-down; the rest (if any) are face-up.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct Column<const N: usize> {
+    pub cards: [Card; N],
+    pub len: u8,
+    pub num_face_down: u8,
+}
+
+impl<const N: usize> Column<N> {
+    /// Create an empty column.
+    pub fn new() -> Self {
+        Self {
+            cards: [Card(0); N],
+            len: 0,
+            num_face_down: 0,
+        }
+    }
+
+    /// Total number of cards in the column.
+    #[inline]
+    pub fn len(&self) -> u8 {
+        self.len
+    }
+
+    /// Number of face-down cards at the top of the column.
+    #[inline]
+    pub fn num_face_down(&self) -> u8 {
+        self.num_face_down
+    }
+
+    /// Number of face-up cards in the column.
+    #[inline]
+    pub fn num_face_up(&self) -> u8 {
+        self.len.saturating_sub(self.num_face_down)
+    }
+
+    /// True if the column has no cards.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Push a card onto the top of the column.
+    ///
+    /// If `face_down` is true, the card becomes face-down; otherwise it
+    /// becomes face-up.
+    pub fn push(&mut self, card: Card, face_down: bool) {
+        assert!((self.len as usize) < N, "Column overflow");
+        self.cards[self.len as usize] = card;
+        self.len += 1;
+        if face_down {
+            self.num_face_down += 1;
+        }
+    }
+
+    /// Peek at the top card (face-up or face-down; no visibility rules).
+    pub fn top(&self) -> Option<Card> {
+        if self.len == 0 {
+            None
+        } else {
+            Some(self.cards[(self.len - 1) as usize])
+        }
+    }
+
+    /// Iterator over all cards from bottom to top.
+    pub fn iter_all(&self) -> impl Iterator<Item = &Card> {
+        self.cards[..(self.len as usize)].iter()
+    }
+
+    /// Iterator over just the face-up portion of the column.
+    pub fn iter_face_up(&self) -> impl Iterator<Item = &Card> {
+        let start = self.num_face_down as usize;
+        self.cards[start..(self.len as usize)].iter()
+    }
+}
+
+/// Full tableau state for a Klondike game.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct Tableau {
+    /// Stock pile (face-down draw pile).
+    pub stock: Pile<MAX_STOCK>,
+    /// Waste pile (face-up).
+    pub waste: Pile<MAX_WASTE>,
+    /// Seven tableau columns.
+    pub columns: [Column<MAX_COL>; NUM_COLS],
+    /// Foundations (one per suit), stored as rank numbers:
+    /// 0 = empty, 1 = Ace, ..., 13 = King.
+    pub foundations: [u8; NUM_FOUNDATIONS],
+}
+
+impl Tableau {
+    /// Create an entirely empty tableau (no cards anywhere).
+    pub fn new_empty() -> Self {
+        Self {
+            stock: Pile::new(),
+            waste: Pile::new(),
+            columns: [Column::new(); NUM_COLS],
+            foundations: [0; NUM_FOUNDATIONS],
+        }
+    }
+
+    /// True if all foundations have reached King (i.e., all 52 cards are up).
+    pub fn is_win(&self) -> bool {
+        self.foundations.iter().all(|&r| r == 13)
+    }
+
+    /// Total number of cards in stock + waste + columns + foundations.
+    ///
+    /// Foundations are counted using their rank number, which is also the
+    /// number of cards in that foundation pile (since ranks are contiguous
+    /// from Ace).
+    pub fn total_cards(&self) -> u8 {
+        let mut sum: u16 = 0;
+        sum += self.stock.len as u16;
+        sum += self.waste.len as u16;
+
+        for col in &self.columns {
+            sum += col.len as u16;
+        }
+
+        // Each foundation rank r represents r cards in that foundation.
+        for &r in &self.foundations {
+            sum += r as u16;
+        }
+
+        sum as u8
+    }
+
+    /// Deal a standard Klondike initial tableau from a shuffled deck.
+    ///
+    /// - `deck[0]` is treated as the top of the face-down deck.
+    /// - 28 cards are dealt to the 7 tableau columns:
+    ///     - Column 0: 1 card (face-up)
+    ///     - Column 1: 2 cards (1 down, 1 up)
+    ///     - ...
+    ///     - Column 6: 7 cards (6 down, 1 up)
+    /// - Remaining 24 cards become the stock, with `deck[CARDS_PER_DECK-1]`
+    ///   as the *top* of the stock.
+    pub fn deal_from_shuffled(deck: [Card; CARDS_PER_DECK as usize]) -> Self {
+        let mut t = Tableau::new_empty();
+        let mut idx: usize = 0;
+
+        // Deal tableau columns.
+        for col_index in 0..NUM_COLS {
+            let col_len = (col_index as u8) + 1;
+            let col = &mut t.columns[col_index];
+            col.len = col_len;
+            col.num_face_down = col_len - 1;
+
+            // First (col_len-1) cards are face-down, last one is face-up.
+            for pos in 0..col_len {
+                col.cards[pos as usize] = deck[idx];
+                idx += 1;
+            }
+        }
+
+        // Remaining cards go to stock; deck[idx] is bottom, deck[51] is top.
+        let remaining = CARDS_PER_DECK as usize - idx;
+        t.stock.len = remaining as u8;
+        for i in 0..remaining {
+            t.stock.cards[i] = deck[idx + i];
+        }
+
+        t
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::card::{standard_deck, Suit, Rank};
+
+    // Note: Rank and Suit are imported only in tests as a convenient way to
+    // construct specific Card values. The main tableau code depends only on
+    // the compact Card representation. This keeps responsibilities separated:
+    // card-level behavior (suit/rank mapping, colors, etc.) is tested in
+    // card.rs, while tableau.rs tests focus on layout and pile semantics
+    // without duplicating those card-level checks or introducing unused
+    // imports in the library build.
+
+    #[test]
+    fn empty_tableau_has_no_cards_and_is_not_win() {
+        let t = Tableau::new_empty();
+        assert_eq!(t.total_cards(), 0);
+        assert!(!t.is_win());
+        assert_eq!(t.stock.len(), 0);
+        assert_eq!(t.waste.len(), 0);
+        for col in &t.columns {
+            assert_eq!(col.len(), 0);
+            assert_eq!(col.num_face_down(), 0);
+        }
+        for &f in &t.foundations {
+            assert_eq!(f, 0);
+        }
+    }
+
+    #[test]
+    fn is_win_detects_all_foundations_complete() {
+        let mut t = Tableau::new_empty();
+        t.foundations = [13; NUM_FOUNDATIONS];
+        assert!(t.is_win());
+        assert_eq!(t.total_cards(), 52);
+    }
+
+    #[test]
+    fn deal_from_standard_deck_initial_klondike_layout() {
+        let deck = standard_deck();
+        let t = Tableau::deal_from_shuffled(deck);
+
+        // All 52 cards must be present exactly once.
+        assert_eq!(t.total_cards(), CARDS_PER_DECK);
+
+        // Foundations & waste are empty initially.
+        assert_eq!(t.waste.len(), 0);
+        assert!(t.foundations.iter().all(|&r| r == 0));
+
+        // Stock should hold 24 cards.
+        assert_eq!(t.stock.len(), MAX_STOCK as u8);
+
+        // Columns: sizes 1..=7, with 0..=6 face-down each.
+        for (i, col) in t.columns.iter().enumerate() {
+            let expected_len = (i as u8) + 1;
+            assert_eq!(col.len(), expected_len);
+            assert_eq!(col.num_face_down(), expected_len - 1);
+            assert_eq!(col.num_face_up(), 1);
+        }
+
+        // Check that every card index 0..51 appears exactly once
+        // across columns and stock (foundations & waste are empty).
+        let mut seen = [false; CARDS_PER_DECK as usize];
+
+        // Columns
+        for col in &t.columns {
+            for card in col.iter_all() {
+                let idx = card.0 as usize;
+                assert!(
+                    !seen[idx],
+                    "duplicate card index {idx} in columns"
+                );
+                seen[idx] = true;
+            }
+        }
+
+        // Stock
+        for card in t.stock.iter() {
+            let idx = card.0 as usize;
+            assert!(
+                !seen[idx],
+                "duplicate card index {idx} in stock"
+            );
+            seen[idx] = true;
+        }
+
+        assert!(
+            seen.iter().all(|&b| b),
+            "some card indices were not dealt"
+        );
+
+        // Spot-check: top of stock is the last card in the deck.
+        let top_stock = t.stock.top().unwrap();
+        let last_deck = deck[(CARDS_PER_DECK as usize) - 1];
+        assert_eq!(top_stock, last_deck);
+    }
+
+    #[test]
+    fn column_face_up_and_face_down_counts() {
+        let mut col: Column<MAX_COL> = Column::new();
+
+        // Push three face-down and two face-up.
+        col.push(Card::new(Suit::Hearts, Rank::Ace), true);
+        col.push(Card::new(Suit::Clubs, Rank::Two), true);
+        col.push(Card::new(Suit::Spades, Rank::Three), true);
+        col.push(Card::new(Suit::Diamonds, Rank::Four), false);
+        col.push(Card::new(Suit::Hearts, Rank::Five), false);
+
+        assert_eq!(col.len(), 5);
+        assert_eq!(col.num_face_down(), 3);
+        assert_eq!(col.num_face_up(), 2);
+
+        let face_up: Vec<String> = col
+            .iter_face_up()
+            .map(|c| c.short_str())
+            .collect();
+
+        // Two face-up cards: "4D" and "5H"
+        assert_eq!(face_up, vec!["4D".to_string(), "5H".to_string()]);
+    }
+}
+

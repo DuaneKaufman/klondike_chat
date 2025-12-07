@@ -5,6 +5,7 @@ pub mod search;
 pub mod display;
 pub mod stats;
 pub mod game;
+pub mod canonical_decks;
 
 use std::env;
 
@@ -58,10 +59,10 @@ pub fn run() {
     println!("Nodes visited: {}", outcome.nodes_visited);
     println!("Win? {}", outcome.is_win);
     println!("Termination reason: {:?}", outcome.termination);
-
     println!("Max branch depth (moves): {}", outcome.max_branch_depth);
     println!("Max shelved games (DFS stack size): {}", outcome.max_shelved);
-    
+    println!("Leaf branches: dead_end = {}, loop_pruned = {}",
+             outcome.dead_end_branches, outcome.loop_pruned_branches);
 
     if let Some(line) = &outcome.winning_line {
         println!("Winning move count: {}", line.len());
