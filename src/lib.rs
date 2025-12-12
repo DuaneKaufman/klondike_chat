@@ -6,6 +6,7 @@ pub mod display;
 pub mod stats;
 pub mod game;
 pub mod canonical_decks;
+pub mod pysol_decks;
 
 use std::env;
 
@@ -14,17 +15,18 @@ use crate::display::{print_tableau, print_playing_edge, print_full_piles_debug};
 use crate::game::GameState;
 
 #[allow(dead_code)]
-pub fn demo_imported_pysol_deck() {
-    // Deck from PySol game_num 13101775566348840960 (winnable)
-    const IMPORTED: [u8; CARDS_PER_DECK as usize] = [
-        51, 32, 3, 27, 35, 7, 45, 15, 5, 6, 39, 31, 17,
-        21, 48, 47, 41, 11, 46, 38, 14, 40, 19, 22, 49,
-        36, 1, 29, 26, 18, 2, 12, 42, 8, 10, 16, 0, 44,
-        24, 23, 30, 34, 20, 9, 4, 33, 37, 28, 50, 25, 43, 13
-    ];
 
-    println!("Imported PySol layout (after direction fix):");
-    let tab = crate::game::layout_from_imported_deck_indices(IMPORTED);
+#[allow(dead_code)]
+fn demo_imported_pysol_deck(deck: [crate::card::Card; CARDS_PER_DECK as usize], label: &str) {
+    println!("Imported PySol layout (label: {}):", label);
+
+    // `layout_from_imported_deck_indices` expects raw indices.
+    let mut idx = [0u8; CARDS_PER_DECK as usize];
+    for (i, c) in deck.iter().enumerate() {
+        idx[i] = c.index();
+    }
+
+    let tab = crate::game::layout_from_imported_deck_indices(idx);
 
     // Single canonical tableau view (with XX for hidden cards)
     print_tableau(&tab);
@@ -32,30 +34,46 @@ pub fn demo_imported_pysol_deck() {
     // Playing edge summary
     print_playing_edge(&tab);
 
-    // NEW: full piles, all cards visible, for debugging/round-trip checks
+    // Full piles, all cards visible, for debugging/round-trip checks
     print_full_piles_debug(&tab);
 
-    let flat: Vec<u8> = tab
-        .flatten_cards()
-        .iter()
-        .map(|c| c.index())
-        .collect();
-    println!("Flattened indices: {:?}", flat);
+    let flat: Vec<u8> = tab.flatten_cards().iter().map(|c| c.index()).collect();
+    println!("Flattened deck from tableau: [{}]", flat.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "));
 }
 
-/// Entry point for the `klondike_chat` binary.
+/// Program entry point.
 ///
-/// Currently this:
-///   - Parses a very small command-line surface:
-///       * `--trace`       → enable per-node DFS tracing
-///       * `--seed=<u32>`  → choose a specific pseudo-random deck
-///   - Builds a single shuffled starting deck from the seed.
-///   - Runs a bounded DFS search on that deck.
-///   - Prints a summary win/loss result, plus the winning line length
-///     if a win is found.
+/// Supported arguments:
+///   * `--trace`                     → enable per-node DFS tracing
+///   * `--seed=<u32>`                → choose a pseudo-random deck (non-PySol)
 ///
-/// Example:
-///   cargo run -- --trace --seed=12345
+/// PySol deck ingestion (decks are integer lists from `dump_pysolfc_deal.py`):
+///   * `--pysol-deck=<LIST>`         → provide one deck list (repeatable)
+///   * `--pysol-deck-file=<PATH>`    → load one or more deck lists from a text file
+///   * `--pysol-file=<PATH>`         → alias for --pysol-deck-file
+///
+/// PySol seed ingestion (pure-Rust reproduction of PySolFC + pysol_cards shuffles):
+///   * `--pysol-seed=<SEED>`         → generate a deck from a PySolFC game number / seed (repeatable)
+///   * `--pysol-seed-file=<PATH>`    → load one seed per line from a text file (blank lines and comments allowed)
+///
+/// Running subsets:
+///   * `--pysol-only=<N>`            → run only the Nth loaded PySol deck (1-based)
+///   * `--pysol-label=<TEXT>`        → run only decks whose label contains TEXT
+///   * `--pysol-label` also applies to seeds (labels are "seed:<...>")
+///
+/// Output:
+///   * For PySol decks: always prints per-deck summary/stats. On wins, printing the full winning move
+///     sequence is controlled by `--pysol-moves` / `--pysol-output=moves` (default is summary-only).
+///   * For non-PySol decks: prints summary stats; use `--print-winning-moves` to print a winning line.
+///
+/// Example (single deck inline):
+///   cargo run --release -- --pysol-deck="[51, 32, 3, ...]" 
+///
+/// Example (many decks from file, run all):
+///   cargo run --release -- --pysol-deck-file=pysol_decks.txt
+///
+/// Example (run only the 3rd deck from file):
+///   cargo run --release -- --pysol-deck-file=pysol_decks.txt --pysol-only=3
 pub fn run() {
     println!("klondike_chat: Klondike solver skeleton starting up");
     println!();
@@ -63,14 +81,35 @@ pub fn run() {
     // Defaults: summary-only search with a fixed seed.
     let mut detail = search::DetailLevel::Summary;
     let mut seed: u32 = 1;
-    let mut demo_pysol: bool = false;
-
-    // Optional: solve a specific imported PySolFC deck.
-    // Today we only support the one known-winnable regression deck.
-    let mut pysol_seed: Option<u64> = None;
 
     // Optional: print the full winning move sequence (even in Summary mode).
     let mut print_winning_moves: bool = false;
+
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    enum PysolOutputMode {
+        /// Print per-deck summary and (on losses) stats. Do not print moves.
+        Summary,
+        /// On wins, print the full move list (replayed for context). On losses, print stats.
+        Moves,
+    }
+
+    // PySol output defaults to summary (wins do not dump the whole move list unless requested).
+    let mut pysol_output_mode: PysolOutputMode = PysolOutputMode::Summary;
+
+    // Optional: show the tableau for the first loaded PySol deck and exit.
+    let mut demo_pysol: bool = false;
+
+    // PySol deck sources.
+    let mut pysol_deck_literals: Vec<String> = Vec::new();
+    let mut pysol_deck_files: Vec<String> = Vec::new();
+
+    // PySol seed sources.
+    let mut pysol_seed_literals: Vec<String> = Vec::new();
+    let mut pysol_seed_files: Vec<String> = Vec::new();
+
+    // PySol selection.
+    let mut pysol_only_index: Option<usize> = None; // 1-based
+    let mut pysol_label_filter: Option<String> = None;
 
     // Very small hand-rolled argument parser.
     for arg in env::args().skip(1) {
@@ -84,114 +123,190 @@ pub fn run() {
                     rest, seed
                 ),
             }
-        } else if arg == "--demo-pysol" {
-            demo_pysol = true;
-        } else if let Some(rest) = arg.strip_prefix("--pysol-seed=") {
-            match rest.parse::<u64>() {
-                Ok(v) => pysol_seed = Some(v),
-                Err(_) => eprintln!(
-                    "Warning: could not parse pysol seed from '{}'; ignoring",
+        } else if arg == "--print-winning-moves" || arg == "--print-moves" {
+            print_winning_moves = true;
+        } else if arg == "--pysol-summary" {
+            pysol_output_mode = PysolOutputMode::Summary;
+        } else if arg == "--pysol-moves" {
+            pysol_output_mode = PysolOutputMode::Moves;
+        } else if let Some(rest) = arg.strip_prefix("--pysol-output=") {
+            match rest {
+                "summary" => pysol_output_mode = PysolOutputMode::Summary,
+                "moves" => pysol_output_mode = PysolOutputMode::Moves,
+                _ => eprintln!(
+                    "Warning: --pysol-output expects 'summary' or 'moves', got '{}'",
                     rest
                 ),
             }
-        } else if arg == "--print-winning-moves" || arg == "--print-moves" {
-            print_winning_moves = true;
+        } else if arg == "--demo-pysol" {
+            demo_pysol = true;
+        } else if let Some(rest) = arg.strip_prefix("--pysol-deck=") {
+            pysol_deck_literals.push(rest.to_string());
+        } else if let Some(rest) = arg.strip_prefix("--pysol-deck-file=") {
+            pysol_deck_files.push(rest.to_string());
+        } else if let Some(rest) = arg.strip_prefix("--pysol-file=") {
+            pysol_deck_files.push(rest.to_string());
+        } else if let Some(rest) = arg.strip_prefix("--pysol-only=") {
+            match rest.parse::<usize>() {
+                Ok(v) if v >= 1 => pysol_only_index = Some(v),
+                _ => eprintln!("Warning: --pysol-only expects a 1-based integer, got '{}'", rest),
+            }
+        } else if let Some(rest) = arg.strip_prefix("--pysol-label=") {
+            pysol_label_filter = Some(rest.to_string());
+        } else if let Some(rest) = arg.strip_prefix("--pysol-seed=") {
+            pysol_seed_literals.push(rest.to_string());
+        } else if let Some(rest) = arg.strip_prefix("--pysol-seed-file=") {
+            pysol_seed_files.push(rest.to_string());
         } else {
             eprintln!(
-                "Warning: unrecognized argument '{}'; supported: --trace, --seed=<u32>, --demo-pysol, --pysol-seed=<u64>, --print-winning-moves",
+                "Warning: unrecognized argument '{}'; try --help in the README/comments",
                 arg
             );
         }
     }
 
-    // Special demo mode: show the tableau for a specific PySol deal imported
-    // via dump_pysolfc_deal.py → transform_to_rust_deck().
-    if demo_pysol {
-        demo_imported_pysol_deck();
-        return;
+    // --- Load PySol decks (if any were provided) ---
+    let mut pysol_decks: Vec<pysol_decks::DeckSpec> = Vec::new();
+
+    for lit in pysol_deck_literals {
+        match pysol_decks::parse_bracketed_deck_list(&lit) {
+            Ok(deck) => pysol_decks.push(pysol_decks::DeckSpec {
+                label: "inline".to_string(),
+                deck,
+            }),
+            Err(e) => eprintln!("Warning: could not parse --pysol-deck deck list: {}", e),
+        }
     }
 
-    // Choose which starting deck to solve.
-    //
-    // If a PySol seed was supplied, we currently only accept the single
-    // known-winnable regression deal (from the ignored unit test).
-    let deck: [card::Card; CARDS_PER_DECK as usize] = if let Some(ps) = pysol_seed {
-        const KNOWN_WINS: u64 = 13101775566348840960;
-        if ps != KNOWN_WINS {
+    for file in pysol_deck_files {
+        let path = std::path::Path::new(&file);
+        match pysol_decks::load_decks_from_file(path) {
+            Ok(mut specs) => pysol_decks.append(&mut specs),
+            Err(e) => eprintln!("Warning: {}", e),
+        }
+    }
+
+    // --- Generate decks from PySol seeds (Option A: pure Rust) ---
+    for seed_s in pysol_seed_literals {
+        match pysol_decks::deck_from_pysol_seed_str(&seed_s) {
+            Ok(spec) => pysol_decks.push(spec),
+            Err(e) => eprintln!("Warning: could not parse --pysol-seed '{}': {}", seed_s, e),
+        }
+    }
+    for file in pysol_seed_files {
+        let path = std::path::Path::new(&file);
+        match pysol_decks::load_seeds_from_file(path) {
+            Ok(mut specs) => pysol_decks.append(&mut specs),
+            Err(e) => eprintln!("Warning: {}", e),
+        }
+    }
+
+    // Apply selection filters if present.
+    if let Some(label_substr) = pysol_label_filter.clone() {
+        pysol_decks.retain(|d| d.label.contains(&label_substr));
+    }
+    if let Some(k) = pysol_only_index {
+        if k == 0 || k > pysol_decks.len() {
             eprintln!(
-                "Error: unsupported --pysol-seed={}; only {} is currently wired up.",
-                ps, KNOWN_WINS
+                "Error: --pysol-only={} out of range; loaded {} PySol deck(s).",
+                k,
+                pysol_decks.len()
             );
             std::process::exit(2);
         }
+        let chosen = pysol_decks[k - 1].clone();
+        pysol_decks.clear();
+        pysol_decks.push(chosen);
+    }
 
-        // Deck from PySolFC game_num 13101775566348840960 (winnable)
-        // in DEALING ORDER, mapped to Card::index().
-        [
-            card::Card(51), card::Card(32), card::Card(3),  card::Card(27), card::Card(35), card::Card(7),
-            card::Card(45), card::Card(15), card::Card(5),  card::Card(6),  card::Card(39), card::Card(31),
-            card::Card(17), card::Card(21), card::Card(48), card::Card(47), card::Card(41), card::Card(11),
-            card::Card(46), card::Card(38), card::Card(14), card::Card(40), card::Card(19), card::Card(22),
-            card::Card(49), card::Card(36), card::Card(1),  card::Card(29), card::Card(26), card::Card(18),
-            card::Card(2),  card::Card(12), card::Card(42), card::Card(8),  card::Card(10), card::Card(16),
-            card::Card(0),  card::Card(44), card::Card(24), card::Card(23), card::Card(30), card::Card(34),
-            card::Card(20), card::Card(9),  card::Card(4),  card::Card(33), card::Card(37), card::Card(28),
-            card::Card(50), card::Card(25), card::Card(43), card::Card(13),
-        ]
-    } else {
-        // Normal solver path: build a pseudo-random starting deck using a simple
-        // deterministic shuffle (no external RNG crates needed).
-        card::shuffled_deck_from_seed(seed)
-    };
+    // If demo requested, show tableau for the first loaded PySol deck and exit.
+    if demo_pysol {
+        if pysol_decks.is_empty() {
+            eprintln!("Error: --demo-pysol requires at least one --pysol-deck or --pysol-deck-file.");
+            std::process::exit(2);
+        }
+        let first = pysol_decks[0].clone();
+        demo_imported_pysol_deck(first.deck, &first.label);
+        return;
+    }
 
     let cfg = search::SearchConfig {
         limits: search::SearchLimits::default(),
         detail,
     };
 
+    // --- If any PySol decks were provided, run them (one or all) ---
+    if !pysol_decks.is_empty() {
+        println!("Loaded {} PySol deck(s).", pysol_decks.len());
+        println!();
+
+        for (i, spec) in pysol_decks.iter().enumerate() {
+            println!("=== PySol deck {} / {} (label: {}) ===", i + 1, pysol_decks.len(), spec.label);
+
+            let outcome = search::solve_single_deck_with_config(spec.deck, &cfg);
+
+            // Always print a per-deck summary. (This is the ""skeleton"" solver, so a win can
+            // still include a very long line; printing it is optional.)
+            println!("Nodes visited: {}", outcome.nodes_visited);
+            println!("Win? {}", outcome.is_win);
+            println!("Termination reason: {:?}", outcome.termination);
+            println!("\nMax branch depth (moves): {}", outcome.max_branch_depth);
+            println!("Max shelved states: {}", outcome.max_shelved);
+            println!("Dead-end branches: {}", outcome.dead_end_branches);
+            println!("Loop-pruned branches: {}", outcome.loop_pruned_branches);
+
+            if outcome.is_win {
+                if let Some(line) = outcome.winning_line.as_ref() {
+                    println!("\nWinning line length: {}", line.len());
+
+                    if pysol_output_mode == PysolOutputMode::Moves {
+                        // Replay for context-dependent move descriptions.
+                        let mut replay = GameState::new(spec.deck);
+                        for (mi, mv) in line.iter().enumerate() {
+                            let tab = replay.current_tableau();
+                            println!("  {:3}: {}", mi + 1, mv.describe(&tab));
+                            replay.apply_move(*mv);
+                        }
+                        debug_assert!(replay.current_tableau().is_win());
+                    }
+                } else {
+                    println!("\n(internal error) win reported but no winning_line recorded");
+                }
+            }
+
+            println!();
+        }
+
+        return;
+    }
+
+    // --- Normal solver path: build a pseudo-random starting deck from `--seed` ---
+    let deck: [card::Card; CARDS_PER_DECK as usize] = card::shuffled_deck_from_seed(seed);
+
     let outcome = search::solve_single_deck_with_config(deck, &cfg);
 
-    if let Some(ps) = pysol_seed {
-        println!("PySol seed: {}", ps);
-    } else {
-        println!("Deck seed: {}", seed);
-    }
+    println!("Deck seed: {}", seed);
     println!("Nodes visited: {}", outcome.nodes_visited);
     println!("Win? {}", outcome.is_win);
     println!("Termination reason: {:?}", outcome.termination);
-    println!(
-        "Max branch depth (moves): {}",
-        outcome.max_branch_depth
-    );
-    println!(
-        "Max shelved games (DFS stack size): {}",
-        outcome.max_shelved
-    );
-    println!(
-        "Leaf branches: dead_end = {}, loop_pruned = {}",
-        outcome.dead_end_branches, outcome.loop_pruned_branches
-    );
+    println!("Max branch depth (moves): {}", outcome.max_branch_depth);
+    println!("Max shelved states: {}", outcome.max_shelved);
+    println!("Dead-end branches: {}", outcome.dead_end_branches);
+    println!("Loop-pruned branches: {}", outcome.loop_pruned_branches);
 
-    if let Some(line) = &outcome.winning_line {
-        println!("Winning move count: {}", line.len());
-
-        // Print full winning line either when explicitly requested, or
-        // when running in Trace mode.
-        if print_winning_moves || !matches!(detail, search::DetailLevel::Summary) {
-            println!("Winning move sequence:");
-
-            // Replay the line so we can render each move with context.
-            // (Many move kinds depend on the current tableau, e.g. which
-            // specific card is on waste/column.)
-            let mut replay = GameState::new(deck);
-            for (i, mv) in line.iter().enumerate() {
-                let tab = replay.current_tableau();
-                println!("  {:3}: {}", i + 1, mv.describe(&tab));
-                replay.apply_move(*mv);
+    if outcome.is_win {
+        if let Some(line) = outcome.winning_line.as_ref() {
+            println!("Winning line length: {}", line.len());
+            if print_winning_moves {
+                println!("Winning moves:");
+                let mut replay = GameState::new(deck);
+                for (i, mv) in line.iter().enumerate() {
+                    let tab = replay.current_tableau();
+                    println!("  {:3}: {}", i + 1, mv.describe(&tab));
+                    replay.apply_move(*mv);
+                }
+                debug_assert!(replay.current_tableau().is_win());
             }
-
-            // Sanity check: the replayed line should end in a win.
-            debug_assert!(replay.current_tableau().is_win());
         }
     }
 }

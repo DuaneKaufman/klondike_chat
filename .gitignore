@@ -1,2 +1,2 @@
-cd ~/klondike_chat
-printf '/target\n**/*.rs.bk\n' > .gitignore
+target/
+Data/
