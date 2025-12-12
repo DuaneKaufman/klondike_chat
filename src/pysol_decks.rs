@@ -432,14 +432,6 @@ struct MTRandom {
 }
 
 impl MTRandom {
-    fn new(seed: u64) -> Self {
-        let mut r = Self {
-            mt: [0u32; 624],
-            index: 624,
-        };
-        r.seed_u64(seed);
-        r
-    }
 
     fn new_big(seed: &BigUint) -> Self {
         let mut r = Self {
@@ -448,22 +440,6 @@ impl MTRandom {
         };
         r.seed_big(seed);
         r
-    }
-
-    fn seed_u64(&mut self, seed: u64) {
-        // CPython: for ints, all bits are used by splitting into 32-bit chunks
-        // (least-significant chunk first) and feeding init_by_array.
-        let mut key: Vec<u32> = Vec::new();
-        let mut x: u64 = seed;
-        if x == 0 {
-            key.push(0);
-        } else {
-            while x != 0 {
-                key.push((x & 0xffff_ffff) as u32);
-                x >>= 32;
-            }
-        }
-        self.init_by_array(&key);
     }
 
     fn seed_big(&mut self, seed: &BigUint) {
