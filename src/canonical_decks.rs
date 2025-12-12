@@ -46,6 +46,7 @@ fn standard_deck_suit_rank() -> [Card; DECK_LEN] {
 ///
 /// That gives these 7 indices for the 7 accessible tableau cards:
 ///   0, 2, 5, 9, 14, 20, 27.
+#[cfg(test)]
 fn accessible_tableau_indices() -> [usize; 7] {
     [0, 2, 5, 9, 14, 20, 27]
 }
@@ -57,6 +58,7 @@ fn accessible_tableau_indices() -> [usize; 7] {
 /// Stock starts at deck index 28, so accessible stock indices are:
 ///   28 + [2,5,8,11,14,17,20,23]
 /// = [30,33,36,39,42,45,48,51].
+#[cfg(test)]
 fn accessible_stock_indices() -> [usize; 8] {
     [30, 33, 36, 39, 42, 45, 48, 51]
 }
@@ -172,16 +174,19 @@ fn unplayable_deck_by_local_conditions() -> [Card; DECK_LEN] {
     deck
 }
 
+#[cfg(test)]
 fn rank_val(r: Rank) -> i32 {
     // We only care about relative differences; assumes Rank discriminants
     // are monotonically increasing from Ace..King.
     r as i32
 }
 
+#[cfg(test)]
 fn is_red(s: Suit) -> bool {
     matches!(s, Suit::Hearts | Suit::Diamonds)
 }
 
+#[cfg(test)]
 fn opposite_colour(a: Card, b: Card) -> bool {
     is_red(a.suit()) != is_red(b.suit())
 }
@@ -190,6 +195,7 @@ fn opposite_colour(a: Card, b: Card) -> bool {
 ///
 /// This encodes the conditions used to build `unplayable_deck_by_local_conditions`
 /// and serves as both documentation and a regression test for that constructor.
+#[cfg(test)]
 fn is_unplayable_by_local_conditions(deck: &[Card; DECK_LEN]) -> bool {
     let tab_idxs = accessible_tableau_indices();
     let stock_idxs = accessible_stock_indices();

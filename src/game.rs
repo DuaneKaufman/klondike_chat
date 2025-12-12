@@ -1,5 +1,5 @@
 //! Game-level state: initial deck + move stack.
-//
+//!
 //! This module defines `GameState`, which encapsulates exactly the data
 //! needed to specify a Klondike game:
 //!   - the initial deck permutation
@@ -214,4 +214,32 @@ impl GameState {
     pub fn current_tableau(&self) -> Tableau {
         self.tableau
     }
+}
+
+/// Convenience: build and print a tableau from an already-shuffled deck.
+///
+/// `deck` must be in the same convention used by `Tableau::deal_from_shuffled`:
+/// index 0 is the first card dealt, index 51 is the last card (and becomes
+/// the *top* of the stock).
+pub fn layout_from_imported_deck(deck: [Card; CARDS_PER_DECK as usize]) -> Tableau {
+    Tableau::deal_from_shuffled(deck)
+}
+
+/// Convenience: variant that accepts raw 0..51 indices instead of `Card`s.
+///
+/// This is the easiest way to paste in the output of `transform_to_rust_deck`
+/// from `dump_pysolfc_deal.py`.
+pub fn layout_from_imported_deck_indices(
+    indices: [u8; CARDS_PER_DECK as usize],
+) -> Tableau {
+    let mut deck = [Card::from_index(0); CARDS_PER_DECK as usize];
+
+    // Python delivered indices[0] = first card dealt,
+    // indices[51] = last card dealt (top of stock).
+    // That is exactly what Tableau::deal_from_shuffled expects.
+    for (i, raw) in indices.iter().enumerate() {
+        deck[i] = Card::from_index(*raw);
+    }
+
+    layout_from_imported_deck(deck)
 }

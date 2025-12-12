@@ -167,6 +167,83 @@ pub fn print_tableau(tab: &Tableau) {
     println!("{}", render_tableau(tab));
 }
 
+/// Print a concise summary of the face-up top card of each tableau column.
+///
+/// Example:
+///   Piles (playing edge):
+///   C1: 4S  C2: 2H  C3: JS  C4: JD  C5: TC  C6: 7C  C7: 2D
+pub fn print_playing_edge(tab: &Tableau) {
+    use crate::tableau::NUM_COLS;
+
+    print!("Piles (playing edge): ");
+    for col_idx in 0..NUM_COLS {
+        let col = &tab.columns[col_idx];
+        if col.len == 0 {
+            // Empty column.
+            print!("C{}: --  ", col_idx + 1);
+            continue;
+        }
+        if col.len <= col.num_face_down {
+            // Column has cards but all face-down (shouldn't happen in Klondike after deal,
+            // but we handle it defensively).
+            print!("C{}: XX  ", col_idx + 1);
+            continue;
+        }
+
+        let top_idx = (col.len - 1) as usize;
+        let top_card = col.cards[top_idx];
+        print!("C{}: {:>2}  ", col_idx + 1, top_card.short_str());
+    }
+    println!();
+}
+
+/// Debug helper: print every pile with all cards shown (ignoring face-down).
+///
+/// - Columns C1..C7: bottom -> top
+/// - Stock: bottom -> top (as stored in `Pile`)
+/// - Waste: bottom -> top
+pub fn print_full_piles_debug(tab: &Tableau) {
+    use crate::tableau::NUM_COLS;
+
+    println!("Full piles (all cards shown, bottom -> top within each pile):");
+
+    // Columns
+    for col_idx in 0..NUM_COLS {
+        let col = &tab.columns[col_idx];
+        print!("  C{}: ", col_idx + 1);
+        if col.len == 0 {
+            println!("<empty>");
+        } else {
+            for card in col.iter_all() {
+                print!("{} ", card.short_str());
+            }
+            println!();
+        }
+    }
+
+    // Stock
+    print!("  Stock: ");
+    if tab.stock.len() == 0 {
+        println!("<empty>");
+    } else {
+        for card in tab.stock.iter() {
+            print!("{} ", card.short_str());
+        }
+        println!("(bottom -> top)");
+    }
+
+    // Waste
+    print!("  Waste: ");
+    if tab.waste.len() == 0 {
+        println!("<empty>");
+    } else {
+        for card in tab.waste.iter() {
+            print!("{} ", card.short_str());
+        }
+        println!("(bottom -> top)");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

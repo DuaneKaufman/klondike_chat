@@ -47,6 +47,7 @@ fn standard_deck_suit_rank() -> [Card; DECK_LEN] {
 ///
 /// That gives these 7 indices for the 7 accessible tableau cards:
 ///   0, 2, 5, 9, 14, 20, 27.
+#[cfg(test)]
 fn accessible_tableau_indices() -> [usize; 7] {
     [0, 2, 5, 9, 14, 20, 27]
 }
@@ -58,6 +59,7 @@ fn accessible_tableau_indices() -> [usize; 7] {
 /// Stock starts at deck index 28, so accessible stock indices are:
 ///   28 + [2,5,8,11,14,17,20,23]
 /// = [30,33,36,39,42,45,48,51].
+#[cfg(test)]
 fn accessible_stock_indices() -> [usize; 8] {
     [30, 33, 36, 39, 42, 45, 48, 51]
 }
@@ -173,16 +175,19 @@ fn unplayable_deck_by_local_conditions() -> [Card; DECK_LEN] {
     deck
 }
 
+#[cfg(test)]
 fn rank_val(r: Rank) -> i32 {
     // We only care about relative differences; assumes Rank discriminants
     // are monotonically increasing from Ace..King.
     r as i32
 }
 
+#[cfg(test)]
 fn is_red(s: Suit) -> bool {
     matches!(s, Suit::Hearts | Suit::Diamonds)
 }
 
+#[cfg(test)]
 fn opposite_colour(a: Card, b: Card) -> bool {
     is_red(a.suit()) != is_red(b.suit())
 }
@@ -191,6 +196,7 @@ fn opposite_colour(a: Card, b: Card) -> bool {
 ///
 /// This encodes the conditions used to build `unplayable_deck_by_local_conditions`
 /// and serves as both documentation and a regression test for that constructor.
+#[cfg(test)]
 fn is_unplayable_by_local_conditions(deck: &[Card; DECK_LEN]) -> bool {
     let tab_idxs = accessible_tableau_indices();
     let stock_idxs = accessible_stock_indices();
@@ -909,6 +915,83 @@ pub fn print_tableau(tab: &Tableau) {
     println!("{}", render_tableau(tab));
 }
 
+/// Print a concise summary of the face-up top card of each tableau column.
+///
+/// Example:
+///   Piles (playing edge):
+///   C1: 4S  C2: 2H  C3: JS  C4: JD  C5: TC  C6: 7C  C7: 2D
+pub fn print_playing_edge(tab: &Tableau) {
+    use crate::tableau::NUM_COLS;
+
+    print!("Piles (playing edge): ");
+    for col_idx in 0..NUM_COLS {
+        let col = &tab.columns[col_idx];
+        if col.len == 0 {
+            // Empty column.
+            print!("C{}: --  ", col_idx + 1);
+            continue;
+        }
+        if col.len <= col.num_face_down {
+            // Column has cards but all face-down (shouldn't happen in Klondike after deal,
+            // but we handle it defensively).
+            print!("C{}: XX  ", col_idx + 1);
+            continue;
+        }
+
+        let top_idx = (col.len - 1) as usize;
+        let top_card = col.cards[top_idx];
+        print!("C{}: {:>2}  ", col_idx + 1, top_card.short_str());
+    }
+    println!();
+}
+
+/// Debug helper: print every pile with all cards shown (ignoring face-down).
+///
+/// - Columns C1..C7: bottom -> top
+/// - Stock: bottom -> top (as stored in `Pile`)
+/// - Waste: bottom -> top
+pub fn print_full_piles_debug(tab: &Tableau) {
+    use crate::tableau::NUM_COLS;
+
+    println!("Full piles (all cards shown, bottom -> top within each pile):");
+
+    // Columns
+    for col_idx in 0..NUM_COLS {
+        let col = &tab.columns[col_idx];
+        print!("  C{}: ", col_idx + 1);
+        if col.len == 0 {
+            println!("<empty>");
+        } else {
+            for card in col.iter_all() {
+                print!("{} ", card.short_str());
+            }
+            println!();
+        }
+    }
+
+    // Stock
+    print!("  Stock: ");
+    if tab.stock.len() == 0 {
+        println!("<empty>");
+    } else {
+        for card in tab.stock.iter() {
+            print!("{} ", card.short_str());
+        }
+        println!("(bottom -> top)");
+    }
+
+    // Waste
+    print!("  Waste: ");
+    if tab.waste.len() == 0 {
+        println!("<empty>");
+    } else {
+        for card in tab.waste.iter() {
+            print!("{} ", card.short_str());
+        }
+        println!("(bottom -> top)");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1146,7 +1229,7 @@ mod tests {
 
 --- FILE: game.rs ---
 //! Game-level state: initial deck + move stack.
-//
+//!
 //! This module defines `GameState`, which encapsulates exactly the data
 //! needed to specify a Klondike game:
 //!   - the initial deck permutation
@@ -1362,6 +1445,35 @@ impl GameState {
         self.tableau
     }
 }
+
+/// Convenience: build and print a tableau from an already-shuffled deck.
+///
+/// `deck` must be in the same convention used by `Tableau::deal_from_shuffled`:
+/// index 0 is the first card dealt, index 51 is the last card (and becomes
+/// the *top* of the stock).
+pub fn layout_from_imported_deck(deck: [Card; CARDS_PER_DECK as usize]) -> Tableau {
+    Tableau::deal_from_shuffled(deck)
+}
+
+/// Convenience: variant that accepts raw 0..51 indices instead of `Card`s.
+///
+/// This is the easiest way to paste in the output of `transform_to_rust_deck`
+/// from `dump_pysolfc_deal.py`.
+pub fn layout_from_imported_deck_indices(
+    indices: [u8; CARDS_PER_DECK as usize],
+) -> Tableau {
+    let mut deck = [Card::from_index(0); CARDS_PER_DECK as usize];
+
+    // Python delivered indices[0] = first card dealt,
+    // indices[51] = last card dealt (top of stock).
+    // That is exactly what Tableau::deal_from_shuffled expects.
+    for (i, raw) in indices.iter().enumerate() {
+        deck[i] = Card::from_index(*raw);
+    }
+
+    layout_from_imported_deck(deck)
+}
+
 --- FILE: lib.rs ---
 pub mod card;
 pub mod tableau;
@@ -1373,6 +1485,38 @@ pub mod game;
 pub mod canonical_decks;
 
 use std::env;
+
+use crate::card::CARDS_PER_DECK;
+use crate::display::{print_tableau, print_playing_edge, print_full_piles_debug};
+
+#[allow(dead_code)]
+pub fn demo_imported_pysol_deck() {
+    const IMPORTED: [u8; CARDS_PER_DECK as usize] = [
+        9, 1, 14, 4, 45, 19, 3, 36, 32, 25, 34, 26, 41, 12,
+        31, 11, 44, 46, 37, 7, 24, 33, 47, 2, 27, 48, 0, 21,
+        43, 22, 42, 50, 10, 17, 38, 8, 15, 35, 5, 16, 13, 18,
+        49, 51, 6, 40, 39, 20, 28, 30, 23, 29,
+    ];
+
+    println!("Imported PySol layout (after direction fix):");
+    let tab = crate::game::layout_from_imported_deck_indices(IMPORTED);
+
+    // Single canonical tableau view (with XX for hidden cards)
+    print_tableau(&tab);
+
+    // Playing edge summary
+    print_playing_edge(&tab);
+
+    // NEW: full piles, all cards visible, for debugging/round-trip checks
+    print_full_piles_debug(&tab);
+
+    let flat: Vec<u8> = tab
+        .flatten_cards()
+        .iter()
+        .map(|c| c.index())
+        .collect();
+    println!("Flattened indices: {:?}", flat);
+}
 
 /// Entry point for the `klondike_chat` binary.
 ///
@@ -1394,6 +1538,7 @@ pub fn run() {
     // Defaults: summary-only search with a fixed seed.
     let mut detail = search::DetailLevel::Summary;
     let mut seed: u32 = 1;
+    let mut demo_pysol: bool = false;
 
     // Very small hand-rolled argument parser.
     for arg in env::args().skip(1) {
@@ -1402,15 +1547,30 @@ pub fn run() {
         } else if let Some(rest) = arg.strip_prefix("--seed=") {
             match rest.parse::<u32>() {
                 Ok(v) => seed = v,
-                Err(_) => eprintln!("Warning: could not parse seed from '{}'; using default {}", rest, seed),
+                Err(_) => eprintln!(
+                    "Warning: could not parse seed from '{}'; using default {}",
+                    rest, seed
+                ),
             }
+        } else if arg == "--demo-pysol" {
+            demo_pysol = true;
         } else {
-            eprintln!("Warning: unrecognized argument '{}'; supported: --trace, --seed=<u32>", arg);
+            eprintln!(
+                "Warning: unrecognized argument '{}'; supported: --trace, --seed=<u32>, --demo-pysol",
+                arg
+            );
         }
     }
 
-    // Build a pseudo-random starting deck using a simple deterministic
-    // shuffle (no external RNG crates needed).
+    // Special demo mode: show the tableau for a specific PySol deal imported
+    // via dump_pysolfc_deal.py → transform_to_rust_deck().
+    if demo_pysol {
+        demo_imported_pysol_deck();
+        return;
+    }
+
+    // Normal solver path: build a pseudo-random starting deck using a simple
+    // deterministic shuffle (no external RNG crates needed).
     let deck = card::shuffled_deck_from_seed(seed);
 
     let cfg = search::SearchConfig {
@@ -1424,16 +1584,23 @@ pub fn run() {
     println!("Nodes visited: {}", outcome.nodes_visited);
     println!("Win? {}", outcome.is_win);
     println!("Termination reason: {:?}", outcome.termination);
-    println!("Max branch depth (moves): {}", outcome.max_branch_depth);
-    println!("Max shelved games (DFS stack size): {}", outcome.max_shelved);
-    println!("Leaf branches: dead_end = {}, loop_pruned = {}",
-             outcome.dead_end_branches, outcome.loop_pruned_branches);
+    println!(
+        "Max branch depth (moves): {}",
+        outcome.max_branch_depth
+    );
+    println!(
+        "Max shelved games (DFS stack size): {}",
+        outcome.max_shelved
+    );
+    println!(
+        "Leaf branches: dead_end = {}, loop_pruned = {}",
+        outcome.dead_end_branches, outcome.loop_pruned_branches
+    );
 
     if let Some(line) = &outcome.winning_line {
         println!("Winning move count: {}", line.len());
         if let search::DetailLevel::Summary = detail {
-            // In summary mode we only show the count by default; this is a
-            // sensible place where you might later add a compact listing.
+            // In summary mode we only show the count by default.
         } else {
             println!("Winning move sequence:");
             for (i, mv) in line.iter().enumerate() {
@@ -2845,7 +3012,7 @@ impl Stats {
 //! type suitable for large-scale search. All cards are represented using the
 //! 1-byte `Card` type from `crate::card`.
 
-use crate::card::{Card, CARDS_PER_DECK};
+use crate::card::{Card, CARDS_PER_DECK, Suit, Rank};
 
 /// Number of tableau columns.
 pub const NUM_COLS: usize = 7;
@@ -3065,6 +3232,69 @@ impl Tableau {
         sum as u8
     }
 
+    /// Flatten this tableau into a canonical 52-card sequence of `Card`s.
+    ///
+    /// The order is:
+    ///   1) Columns 0..6, each in storage order `cards[0..len)`.
+    ///   2) Stock pile, bottom-to-top (same as `Pile::iter()`).
+    ///   3) Waste pile, bottom-to-top.
+    ///   4) Foundations, for each suit in `Suit::ALL` order, from Ace up to
+    ///      the current top rank (if any).
+    ///
+    /// This ordering is mirrored in the Python tooling so that layouts
+    /// from Python and Rust can be compared directly.
+    pub fn flatten_cards(&self) -> [Card; CARDS_PER_DECK as usize] {
+        let mut out = [Card(0); CARDS_PER_DECK as usize];
+        let mut k = 0usize;
+
+        // 1) Columns: column-major, storage order.
+        for col in &self.columns {
+            let len = col.len as usize;
+            for i in 0..len {
+                out[k] = col.cards[i];
+                k += 1;
+            }
+        }
+
+        // 2) Stock: bottom-to-top (Pile::iter()).
+        for card in self.stock.iter() {
+            out[k] = *card;
+            k += 1;
+        }
+
+        // 3) Waste: bottom-to-top.
+        for card in self.waste.iter() {
+            out[k] = *card;
+            k += 1;
+        }
+
+        // 4) Foundations: suit-major, rank-minor.
+        //
+        // foundations[i] = 0..=13 where N>0 means top rank index is N-1,
+        // so there are N cards: ranks 0..N-1.
+        for (suit_idx, &rank_count) in self.foundations.iter().enumerate() {
+            if rank_count == 0 {
+                continue;
+            }
+            let suit = Suit::ALL[suit_idx];
+            for rank_idx in 0..(rank_count as usize) {
+                let rank = Rank::from_u8(rank_idx as u8);
+                out[k] = Card::new(suit, rank);
+                k += 1;
+            }
+        }
+
+        debug_assert_eq!(
+            k,
+            CARDS_PER_DECK as usize,
+            "flatten_cards(): expected to collect exactly {} cards, got {}",
+            CARDS_PER_DECK,
+            k
+        );
+
+        out
+    }
+
     /// Deal a standard Klondike initial tableau from a shuffled deck.
     ///
     /// - `deck[0]` is treated as the top of the face-down deck.
@@ -3079,8 +3309,8 @@ impl Tableau {
         let mut t = Tableau::new_empty();
         let mut idx: usize = 0;
 
-        // Deal tableau columns.
-        for col_index in 0..NUM_COLS {
+        // Deal tableau columns in PySol direction: rightmost (C7) first.
+        for col_index in (0..NUM_COLS).rev() {
             let col_len = (col_index as u8) + 1;
             let col = &mut t.columns[col_index];
             col.len = col_len;

@@ -4,7 +4,7 @@
 //! type suitable for large-scale search. All cards are represented using the
 //! 1-byte `Card` type from `crate::card`.
 
-use crate::card::{Card, CARDS_PER_DECK};
+use crate::card::{Card, CARDS_PER_DECK, Suit, Rank};
 
 /// Number of tableau columns.
 pub const NUM_COLS: usize = 7;
@@ -224,39 +224,142 @@ impl Tableau {
         sum as u8
     }
 
-    /// Deal a standard Klondike initial tableau from a shuffled deck.
+    /// Flatten this tableau into a canonical 52-card sequence of `Card`s.
     ///
-    /// - `deck[0]` is treated as the top of the face-down deck.
-    /// - 28 cards are dealt to the 7 tableau columns:
-    ///     - Column 0: 1 card (face-up)
-    ///     - Column 1: 2 cards (1 down, 1 up)
-    ///     - ...
-    ///     - Column 6: 7 cards (6 down, 1 up)
-    /// - Remaining 24 cards become the stock, with `deck[CARDS_PER_DECK-1]`
-    ///   as the *top* of the stock.
-    pub fn deal_from_shuffled(deck: [Card; CARDS_PER_DECK as usize]) -> Self {
-        let mut t = Tableau::new_empty();
-        let mut idx: usize = 0;
+    /// The order is:
+    ///   1) Columns 0..6, each in storage order `cards[0..len)`.
+    ///   2) Stock pile, bottom-to-top (same as `Pile::iter()`).
+    ///   3) Waste pile, bottom-to-top.
+    ///   4) Foundations, for each suit in `Suit::ALL` order, from Ace up to
+    ///      the current top rank (if any).
+    ///
+    /// This ordering is mirrored in the Python tooling so that layouts
+    /// from Python and Rust can be compared directly.
+    pub fn flatten_cards(&self) -> [Card; CARDS_PER_DECK as usize] {
+        let mut out = [Card(0); CARDS_PER_DECK as usize];
+        let mut k = 0usize;
 
-        // Deal tableau columns.
-        for col_index in 0..NUM_COLS {
-            let col_len = (col_index as u8) + 1;
-            let col = &mut t.columns[col_index];
-            col.len = col_len;
-            col.num_face_down = col_len - 1;
-
-            // First (col_len-1) cards are face-down, last one is face-up.
-            for pos in 0..col_len {
-                col.cards[pos as usize] = deck[idx];
-                idx += 1;
+        // 1) Columns: column-major, storage order.
+        for col in &self.columns {
+            let len = col.len as usize;
+            for i in 0..len {
+                out[k] = col.cards[i];
+                k += 1;
             }
         }
 
-        // Remaining cards go to stock; deck[idx] is bottom, deck[51] is top.
-        let remaining = CARDS_PER_DECK as usize - idx;
-        t.stock.len = remaining as u8;
+        // 2) Stock: bottom-to-top (Pile::iter()).
+        for card in self.stock.iter() {
+            out[k] = *card;
+            k += 1;
+        }
+
+        // 3) Waste: bottom-to-top.
+        for card in self.waste.iter() {
+            out[k] = *card;
+            k += 1;
+        }
+
+        // 4) Foundations: suit-major, rank-minor.
+        //
+        // foundations[i] = 0..=13 where N>0 means top rank index is N-1,
+        // so there are N cards: ranks 0..N-1.
+        for (suit_idx, &rank_count) in self.foundations.iter().enumerate() {
+            if rank_count == 0 {
+                continue;
+            }
+            let suit = Suit::ALL[suit_idx];
+            for rank_idx in 0..(rank_count as usize) {
+                let rank = Rank::from_u8(rank_idx as u8);
+                out[k] = Card::new(suit, rank);
+                k += 1;
+            }
+        }
+
+        debug_assert_eq!(
+            k,
+            CARDS_PER_DECK as usize,
+            "flatten_cards(): expected to collect exactly {} cards, got {}",
+            CARDS_PER_DECK,
+            k
+        );
+
+        out
+    }
+
+    /// Deal a standard PySol-style Klondike initial tableau from a shuffled deck.
+    ///
+    /// Assumptions:
+    /// - `deck[0]` is the *top* of the face-down stock (first card dealt).
+    /// - 28 cards are dealt into 7 tableau columns using the same pattern as
+    ///   PySol's `Klondike.startGame` with `reverse=1`:
+    ///
+    ///   for i in 1..len(rows):
+    ///       talon.dealRow(rows[i:], reverse=1)
+    ///   talon.dealRow(reverse=1)
+    ///
+    ///   where `reverse=1` means "deal from rightmost to leftmost" over the
+    ///   given slice of rows.
+    ///
+    /// - Remaining cards go to the stock; storage order is bottom-to-top.
+    pub fn deal_from_shuffled(deck: [Card; CARDS_PER_DECK as usize]) -> Self {
+        let mut t = Tableau::new_empty();
+
+        // `pos` is index into `deck`; deck[0] is the first card dealt.
+        let mut pos: usize = 0;
+
+        // First, mimic:
+        //   for i in range(1, len(rows)):
+        //       talon.dealRow(rows=rows[i:], reverse=1)
+        //
+        // That gives these destination columns (0-based):
+        //   i = 1: cols 6,5,4,3,2,1
+        //   i = 2: cols 6,5,4,3,2
+        //   i = 3: cols 6,5,4,3
+        //   i = 4: cols 6,5,4
+        //   i = 5: cols 6,5
+        //   i = 6: cols 6
+        //
+        // All of these cards are **face-down**.
+        for start_col in 1..NUM_COLS {
+            for col_idx in (start_col..NUM_COLS).rev() {
+                let card = deck[pos];
+                pos += 1;
+
+                let col = &mut t.columns[col_idx];
+                col.cards[col.len as usize] = card;
+                col.len += 1;
+                col.num_face_down += 1;
+            }
+        }
+
+        // Then PySol does:
+        //   talon.dealRow(reverse=1)
+        //
+        // i.e. a full row to all columns, again right-to-left, but those cards
+        // become the *top* card of each pile and are face-up.
+        for col_idx in (0..NUM_COLS).rev() {
+            let card = deck[pos];
+            pos += 1;
+
+            let col = &mut t.columns[col_idx];
+            col.cards[col.len as usize] = card;
+            col.len += 1;
+            // This top card is face-up; do NOT increment num_face_down.
+        }
+
+        debug_assert_eq!(pos, 28, "Expected to deal 28 cards to the tableau");
+
+        // Remaining cards (24) go into the stock.
+        //
+        // `stock.cards[0]` is the bottom of the stock,
+        // `stock.cards[stock.len-1]` is the top.
+        let remaining = (CARDS_PER_DECK as usize) - pos;
+        let stock = &mut t.stock;
+        stock.len = remaining as u8;
+
         for i in 0..remaining {
-            t.stock.cards[i] = deck[idx + i];
+            stock.cards[i] = deck[pos + i];
         }
 
         t
