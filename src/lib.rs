@@ -14,11 +14,12 @@ use crate::display::{print_tableau, print_playing_edge, print_full_piles_debug};
 
 #[allow(dead_code)]
 pub fn demo_imported_pysol_deck() {
+    // Deck from PySol game_num 13101775566348840960 (winnable)
     const IMPORTED: [u8; CARDS_PER_DECK as usize] = [
-        9, 1, 14, 4, 45, 19, 3, 36, 32, 25, 34, 26, 41, 12,
-        31, 11, 44, 46, 37, 7, 24, 33, 47, 2, 27, 48, 0, 21,
-        43, 22, 42, 50, 10, 17, 38, 8, 15, 35, 5, 16, 13, 18,
-        49, 51, 6, 40, 39, 20, 28, 30, 23, 29,
+        51, 32, 3, 27, 35, 7, 45, 15, 5, 6, 39, 31, 17,
+        21, 48, 47, 41, 11, 46, 38, 14, 40, 19, 22, 49,
+        36, 1, 29, 26, 18, 2, 12, 42, 8, 10, 16, 0, 44,
+        24, 23, 30, 34, 20, 9, 4, 33, 37, 28, 50, 25, 43, 13
     ];
 
     println!("Imported PySol layout (after direction fix):");

@@ -287,79 +287,49 @@ impl Tableau {
         out
     }
 
-    /// Deal a standard PySol-style Klondike initial tableau from a shuffled deck.
+    /// Deal a standard Klondike initial tableau from a *dealing-order* deck.
     ///
-    /// Assumptions:
-    /// - `deck[0]` is the *top* of the face-down stock (first card dealt).
-    /// - 28 cards are dealt into 7 tableau columns using the same pattern as
-    ///   PySol's `Klondike.startGame` with `reverse=1`:
+    /// This matches PySolFC's `Klondike.startGame(flip=0, reverse=1)` logic:
     ///
-    ///   for i in 1..len(rows):
-    ///       talon.dealRow(rows[i:], reverse=1)
-    ///   talon.dealRow(reverse=1)
-    ///
-    ///   where `reverse=1` means "deal from rightmost to leftmost" over the
-    ///   given slice of rows.
-    ///
-    /// - Remaining cards go to the stock; storage order is bottom-to-top.
+    /// - `deck[0]` is the *first* card dealt from the talon.
+    /// - 21 face-down cards are dealt in 6 rounds, each round dealing to the
+    ///   rightmost eligible columns first (C7, C6, ...), i.e. "reverse=1".
+    /// - Then 7 face-up cards are dealt (again right-to-left), placing exactly
+    ///   one face-up card on top of each column.
+    /// - The remaining 24 cards form the stock such that the next draw from
+    ///   stock corresponds to the next card in `deck`.
     pub fn deal_from_shuffled(deck: [Card; CARDS_PER_DECK as usize]) -> Self {
         let mut t = Tableau::new_empty();
+        let mut idx: usize = 0; // next card to consume from `deck`
 
-        // `pos` is index into `deck`; deck[0] is the first card dealt.
-        let mut pos: usize = 0;
-
-        // First, mimic:
-        //   for i in range(1, len(rows)):
-        //       talon.dealRow(rows=rows[i:], reverse=1)
+        // 1) 6 rounds of face-down dealing.
         //
-        // That gives these destination columns (0-based):
-        //   i = 1: cols 6,5,4,3,2,1
-        //   i = 2: cols 6,5,4,3,2
-        //   i = 3: cols 6,5,4,3
-        //   i = 4: cols 6,5,4
-        //   i = 5: cols 6,5
-        //   i = 6: cols 6
-        //
-        // All of these cards are **face-down**.
-        for start_col in 1..NUM_COLS {
-            for col_idx in (start_col..NUM_COLS).rev() {
-                let card = deck[pos];
-                pos += 1;
-
-                let col = &mut t.columns[col_idx];
-                col.cards[col.len as usize] = card;
-                col.len += 1;
-                col.num_face_down += 1;
+        // Round 1 deals to columns 1..6 (C2..C7), right-to-left.
+        // Round 2 deals to columns 2..6 (C3..C7), right-to-left.
+        // ...
+        // Round 6 deals to column 6 only (C7).
+        for round_start in 1..NUM_COLS {
+            for col in (round_start..NUM_COLS).rev() {
+                t.columns[col].push(deck[idx], true);
+                idx += 1;
             }
         }
 
-        // Then PySol does:
-        //   talon.dealRow(reverse=1)
-        //
-        // i.e. a full row to all columns, again right-to-left, but those cards
-        // become the *top* card of each pile and are face-up.
-        for col_idx in (0..NUM_COLS).rev() {
-            let card = deck[pos];
-            pos += 1;
-
-            let col = &mut t.columns[col_idx];
-            col.cards[col.len as usize] = card;
-            col.len += 1;
-            // This top card is face-up; do NOT increment num_face_down.
+        // 2) Final face-up deal: one card to each column, right-to-left.
+        for col in (0..NUM_COLS).rev() {
+            t.columns[col].push(deck[idx], false);
+            idx += 1;
         }
 
-        debug_assert_eq!(pos, 28, "Expected to deal 28 cards to the tableau");
-
-        // Remaining cards (24) go into the stock.
+        // 3) Remaining cards become the stock.
         //
-        // `stock.cards[0]` is the bottom of the stock,
-        // `stock.cards[stock.len-1]` is the top.
-        let remaining = (CARDS_PER_DECK as usize) - pos;
-        let stock = &mut t.stock;
-        stock.len = remaining as u8;
-
+        // Our `Pile` uses bottom-to-top storage and `top()` returns the last
+        // element. The *next* card to be drawn from stock must be `deck[idx]`,
+        // so we store the remaining sequence reversed.
+        let remaining = (CARDS_PER_DECK as usize).saturating_sub(idx);
+        t.stock.len = remaining as u8;
         for i in 0..remaining {
-            stock.cards[i] = deck[pos + i];
+            t.stock.cards[remaining - 1 - i] = deck[idx + i];
         }
 
         t
