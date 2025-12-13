@@ -103,6 +103,17 @@ pub fn run() {
     let mut pysol_deck_literals: Vec<String> = Vec::new();
     let mut pysol_deck_files: Vec<String> = Vec::new();
 
+    // Batch scan: generate and solve a sequence of PySol seeds, recording results to CSV.
+    // Range syntax is half-open: --pysol-seed-range=START:END solves seeds START..END (END not included).
+    let mut pysol_seed_range: Option<(u64, u64)> = None;
+    let mut out_csv: Option<String> = None;
+    let mut resume_from_csv: bool = false;
+
+    // Optional per-search limits (recorded in CSV when scanning).
+    let mut max_nodes_override: Option<u64> = None;
+    let mut max_depth_override: Option<u16> = None;
+
+
     // PySol seed sources.
     let mut pysol_seed_literals: Vec<String> = Vec::new();
     let mut pysol_seed_files: Vec<String> = Vec::new();
@@ -138,6 +149,36 @@ pub fn run() {
                     rest
                 ),
             }
+        } else if let Some(rest) = arg.strip_prefix("--pysol-seed-range=") {
+            // Format: START:END (half-open interval START..END).
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.len() == 2 {
+                match (parts[0].parse::<u64>(), parts[1].parse::<u64>()) {
+                    (Ok(a), Ok(b)) if a < b => pysol_seed_range = Some((a, b)),
+                    (Ok(a), Ok(b)) => eprintln!(
+                        "Warning: --pysol-seed-range requires START < END, got {}:{}",
+                        a, b
+                    ),
+                    _ => eprintln!("Warning: could not parse --pysol-seed-range '{}'", rest),
+                }
+            } else {
+                eprintln!("Warning: --pysol-seed-range expects START:END, got '{}'", rest);
+            }
+        } else if let Some(rest) = arg.strip_prefix("--out-csv=") {
+            out_csv = Some(rest.to_string());
+        } else if arg == "--resume" {
+            resume_from_csv = true;
+        } else if let Some(rest) = arg.strip_prefix("--max-nodes=") {
+            match rest.parse::<u64>() {
+                Ok(v) => max_nodes_override = Some(v),
+                Err(_) => eprintln!("Warning: --max-nodes expects an integer, got '{}'", rest),
+            }
+        } else if let Some(rest) = arg.strip_prefix("--max-depth=") {
+            match rest.parse::<u16>() {
+                Ok(v) => max_depth_override = Some(v),
+                Err(_) => eprintln!("Warning: --max-depth expects an integer (u16), got '{}'", rest),
+            }
+
         } else if arg == "--demo-pysol" {
             demo_pysol = true;
         } else if let Some(rest) = arg.strip_prefix("--pysol-deck=") {
@@ -230,10 +271,126 @@ pub fn run() {
         return;
     }
 
-    let cfg = search::SearchConfig {
+    let mut cfg = search::SearchConfig {
         limits: search::SearchLimits::default(),
         detail,
     };
+
+    if let Some(v) = max_nodes_override {
+        cfg.limits.max_nodes = v;
+    }
+    if let Some(v) = max_depth_override {
+        cfg.limits.max_depth = v;
+    }
+
+    // --- Batch scan mode: sequential seeds recorded to CSV ---
+    if let Some((start, end)) = pysol_seed_range {
+        let csv_path = match out_csv.as_ref() {
+            Some(p) => p,
+            None => {
+                eprintln!("Error: --pysol-seed-range requires --out-csv=PATH");
+                return;
+            }
+        };
+
+        use std::collections::HashSet;
+        use std::fs::OpenOptions;
+        use std::io::{BufRead, BufReader, Write};
+
+        let mut completed: HashSet<String> = HashSet::new();
+        if resume_from_csv {
+            if let Ok(f) = std::fs::File::open(csv_path) {
+                let reader = BufReader::new(f);
+                for (lineno, line) in reader.lines().enumerate() {
+                    let line = match line {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    if lineno == 0 && line.starts_with("seed,") {
+                        continue; // header
+                    }
+                    let seed_field = line.splitn(2, ',').next().unwrap_or("").trim();
+                    if !seed_field.is_empty() {
+                        completed.insert(seed_field.to_string());
+                    }
+                }
+            }
+        }
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(csv_path)
+            .unwrap_or_else(|e| {
+                eprintln!("Error: could not open CSV '{}': {}", csv_path, e);
+                std::process::exit(1);
+            });
+
+        // Write header iff file is empty.
+        let need_header = file.metadata().map(|m| m.len() == 0).unwrap_or(true);
+        if need_header {
+            writeln!(
+                file,
+                "seed,deal_family,win,termination_reason,nodes_visited,elapsed_ms,max_branch_depth,max_shelved_states,dead_end_branches,loop_pruned_branches,winning_line_len,detail,max_nodes_limit,max_depth_limit"
+            ).ok();
+            file.flush().ok();
+        }
+
+        for seed_u64 in start..end {
+            let seed_s = seed_u64.to_string();
+            if resume_from_csv && completed.contains(&seed_s) {
+                continue;
+            }
+
+            // Generate the PySol deck for this numeric seed and solve it.
+            let spec = match pysol_decks::deck_from_pysol_seed_str(&seed_s) {
+                Ok(s) => s,
+                Err(e) => {
+                    // Record parse/deal errors as a row so the scan can continue.
+                    writeln!(
+                        file,
+                        "{},{},0,SeedParseError:{},0,0,0,0,0,0,,{:?},{},{}",
+                        seed_s,
+                        if seed_u64 < 32000 { "MS" } else { "MT" },
+                        e.replace(',', ";"),
+                        cfg.detail,
+                        cfg.limits.max_nodes,
+                        cfg.limits.max_depth
+                    ).ok();
+                    file.flush().ok();
+                    continue;
+                }
+            };
+
+            let t0 = std::time::Instant::now();
+            let outcome = search::solve_single_deck_with_config(spec.deck, &cfg);
+            let elapsed_ms: u128 = t0.elapsed().as_millis();
+
+            let winning_len = outcome.winning_line.as_ref().map(|v| v.len()).unwrap_or(0);
+            writeln!(
+                file,
+                "{},{},{},{:?},{},{},{},{},{},{},{},{:?},{},{}",
+                seed_s,
+                if seed_u64 < 32000 { "MS" } else { "MT" },
+                if outcome.is_win { 1 } else { 0 },
+                outcome.termination,
+                outcome.nodes_visited,
+                elapsed_ms,
+                outcome.max_branch_depth,
+                outcome.max_shelved,
+                outcome.dead_end_branches,
+                outcome.loop_pruned_branches,
+                winning_len,
+                cfg.detail,
+                cfg.limits.max_nodes,
+                cfg.limits.max_depth
+            ).ok();
+            file.flush().ok();
+        }
+
+        return;
+    }
+
 
     // --- If any PySol decks were provided, run them (one or all) ---
     if !pysol_decks.is_empty() {
